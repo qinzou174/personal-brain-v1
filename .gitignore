@@ -12,6 +12,7 @@ secrets/
 # Personal data, generated assets, databases and backups
 data/
 assets/
+!packages/infrastructure/personal_brain_infra/assets/
 backups/
 exports/
 uploads/
