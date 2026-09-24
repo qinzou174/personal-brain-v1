@@ -55,7 +55,8 @@ def get_brain_context(*, client_id: str, grants: list[dict], intent: str, reques
                                     ceiling=budget, mandatory_warnings=package.warnings)
     return {"intent": intent, "current_state": list(package.current_state),
             "historical_rationale": list(package.historical_rationale),
-            "warnings": bounded["warnings"], "used_budget": bounded["used_budget"]}
+            "warnings": bounded["warnings"], "used_budget": bounded["used_budget"],
+            "ranking_reasons": [list(r) for r in package.ranking_reasons]}
 
 
 def get_self_context(*, client_id: str, grants: list[dict], categories: list[str],

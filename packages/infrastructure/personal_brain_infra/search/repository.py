@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 
-from personal_brain_domain.retrieval.ranking import rrf_fuse
+from personal_brain_domain.retrieval.ranking import _signal_reasons, rrf_fuse
 from personal_brain_infra.search.tokenization import TOKENIZER_ID, fts_query_text, fts_text
 
 _SENSITIVITY_ORDER = ("normal", "personal", "private", "highly_private")
@@ -97,6 +97,12 @@ class PostgresSearchRepository:
             warnings = list(metadata.get("warnings") or [])
             if row["freshness"] != "fresh":
                 warnings.append(f"freshness:{row['freshness']}")
+            reasons = _signal_reasons({
+                "freshness": row["freshness"],
+                "confidence": metadata.get("confidence"),
+                "information_class": row["canonicality"],
+                "source_trust": metadata.get("source_trust"),
+            }) or ("rrf",)
             results.append({
                 "entry_id": str(entry_id), "target_type": row["target_type"],
                 "target_id": str(row["target_id"]), "scope": row["authorized_scope"],
@@ -106,5 +112,6 @@ class PostgresSearchRepository:
                 "source_links": list(metadata.get("source_links") or []),
                 "warnings": list(dict.fromkeys(warnings)),
                 "vector_model_version": row["vector_model_version"],
+                "ranking_reasons": list(reasons),
             })
         return results
