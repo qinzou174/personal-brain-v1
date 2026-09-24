@@ -418,6 +418,61 @@ def test_repeating_a_statement_replays_instead_of_crashing(harness):
     assert len(rows) == 1 and rows[0]["lifecycle_state"] == "deleted"
 
 
+def test_creator_grant_keeps_the_client_epoch(harness):
+    """The creator self-grant is additive and must not bump the permission epoch:
+    an OAuth token carries the epoch it was issued with, so bumping here would
+    invalidate the very token that created the project (next call: 401)."""
+    service, token, provisioned = _service(harness)
+    with harness.factory() as session:
+        import sqlalchemy as sa
+
+        before = session.scalar(sa.select(harness.tables["clients"].c.permission_epoch).where(
+            harness.tables["clients"].c.id == UUID(provisioned["client_id"]),
+        ))
+    service.create_project(
+        credential=token, name="纪元稳定验证", purpose="self grant must not bump the epoch",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    with harness.factory() as session:
+        import sqlalchemy as sa
+
+        after = session.scalar(sa.select(harness.tables["clients"].c.permission_epoch).where(
+            harness.tables["clients"].c.id == UUID(provisioned["client_id"]),
+        ))
+    assert after == before
+
+
+def test_another_client_cannot_write_into_a_foreign_project(harness):
+    """checkpoint/finalize authorize against the task's project, so the broad
+    `projects` scope alone must not grant writes into a project never shared."""
+    from personal_brain_domain.common.errors import BrainError
+
+    owner_service, owner_token, _owner = _service(harness)
+    project_id = owner_service.create_project(
+        credential=owner_token, name="外部写入验证", purpose="task authority is per project",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    task_id = owner_service.start_task(
+        credential=owner_token, project_id=project_id, goal="只允许本项目成员改动",
+        revision="r1", dirty_state=False, constraints=[], idempotency_key=uuid4(),
+    )["task_id"]
+
+    outsider_service, outsider_token, _outsider = _service(harness)
+    with pytest.raises(BrainError) as denied:
+        outsider_service.checkpoint_task(
+            credential=outsider_token, task_id=UUID(task_id), completed_work="偷改",
+            next_step="x", problems="", requested_scope="projects", idempotency_key=uuid4(),
+        )
+    assert denied.value.code == "SCOPE_DENIED"
+    with pytest.raises(BrainError) as denied_finalize:
+        outsider_service.finalize_task(
+            credential=outsider_token, task_id=UUID(task_id), outcome="偷收尾", verification="x",
+            remaining_work="", changed_files=[], requested_scope="projects",
+            idempotency_key=uuid4(),
+        )
+    assert denied_finalize.value.code == "SCOPE_DENIED"
+
+
 def _project_rows(harness, project_id):
     import sqlalchemy as sa
 

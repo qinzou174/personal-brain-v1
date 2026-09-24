@@ -32,6 +32,10 @@ class _Store:
     def __init__(self, **kwargs) -> None:
         self.calls: list[dict] = []
 
+    def project_of_task(self, task_id: uuid.UUID) -> uuid.UUID:
+        # Authority now comes from the task's own project, not the caller scope.
+        return uuid.UUID("33333333-3333-3333-3333-333333333333")
+
     def checkpoint_project_task(self, **kwargs) -> dict:
         self.calls.append(kwargs)
         return {"status": "accepted", "task_id": str(kwargs["task_id"])}

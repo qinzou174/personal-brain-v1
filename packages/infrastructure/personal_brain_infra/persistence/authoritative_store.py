@@ -1168,6 +1168,22 @@ class AuthoritativeStore:
             pre_commit=pre_commit,
         )
 
+    def project_of_task(self, task_id: UUID) -> UUID | None:
+        """The project a task belongs to, so callers can authorize per project.
+
+        Checkpoint/finalize used to authorize against a caller-supplied scope,
+        which let any client holding a broad scope write into a project it was
+        never granted; the owner's task row is the authoritative binding.
+        """
+        tasks = self.tables["project_tasks"]
+        with self._session_factory() as session:
+            self._assert_authority(session)
+            project_id = session.scalar(sa.select(tasks.c.project_id).where(
+                tasks.c.id == self._db_id(tasks, "id", task_id),
+                tasks.c.owner_id == self._db_id(tasks, "owner_id", self.owner_id),
+            ))
+        return None if project_id is None else UUID(self._external_id(project_id))
+
     def checkpoint_project_task(
         self, *, task_id: UUID, completed_work: str, next_step: str,
         problems: str, revision: str | None, idempotency_key: UUID,

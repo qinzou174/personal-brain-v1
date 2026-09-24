@@ -117,10 +117,13 @@ def test_search_project_authorizes_project_read_scope():
     assert search.searches[0]["authorized_scope"] == f"project:{project_id}"
 
 
-def test_answer_brain_keeps_knowledge_read_and_rechecks_around_model_call():
+def test_answer_brain_authorizes_as_search_read_and_rechecks_around_model_call():
+    """Answering a question is retrieval plus a summary, so it authorizes exactly
+    like search_brain (``search.read``): authorizing it as ``knowledge.read``
+    denied every scope except knowledge while search_brain kept working."""
     from personal_brain_infra.models.gateway import ModelCard, ModelGateway
 
-    authority = RecordingAuthority(allowed={"knowledge.read"})
+    authority = RecordingAuthority(allowed={"search.read"})
     gateway = ModelGateway(
         provider=lambda payload: {"text": "依据证据", "model": payload["model"]},
         card=ModelCard(name="m", version="v1", dimensions=0, tokenizer="t",
@@ -132,7 +135,7 @@ def test_answer_brain_keeps_knowledge_read_and_rechecks_around_model_call():
     )
     result = service.answer_brain(credential="opaque", query="问题", requested_scope="knowledge")
     assert result["grounded"] is True
-    assert {tool for tool, _scope in authority.calls} == {"knowledge.read"}
+    assert {tool for tool, _scope in authority.calls} == {"search.read"}
     assert len(authority.calls) >= 3, "ER-06 rechecks before source read, external call and response"
 
 

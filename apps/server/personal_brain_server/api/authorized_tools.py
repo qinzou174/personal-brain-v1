@@ -260,8 +260,11 @@ class AuthorizedToolService:
         if self._model_gateway is None:
             raise BrainError("TOOL_DENIED")
         context = self._authority.authenticate(credential)
+        # search.read, like search_brain: answering a question is retrieval plus a
+        # summary, and authorizing it as knowledge.read@<scope> made every scope
+        # other than knowledge answer SCOPE_DENIED while search_brain succeeded.
         recheck = lambda: self._authority.authorize(
-            context, tool="knowledge.read", scope=requested_scope,
+            context, tool="search.read", scope=requested_scope,
             sensitivity=sensitivity_ceiling,
         )
         recheck()
@@ -426,11 +429,18 @@ class AuthorizedToolService:
                         decisions: list[str] | None = None,
                         verification_evidence: str | None = None) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        # Authorize against the task's own project, not the caller-declared scope:
+        # a client holding the broad `projects` scope must not be able to write
+        # into a project it was never granted. `requested_scope` stays in the
+        # request schema for compatibility and is no longer an authority input.
+        project_id = store.project_of_task(task_id)
+        if project_id is None:
+            raise BrainError("NOT_FOUND")
         recheck = lambda: self._authority.authorize(
-            context, tool="project.write", scope=requested_scope, sensitivity="private",
+            context, tool="project.write", scope=f"project:{project_id}", sensitivity="private",
         )
         recheck()
-        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
         result = store.checkpoint_project_task(
             task_id=task_id, completed_work=completed_work, next_step=next_step,
             problems=problems, revision=revision, idempotency_key=idempotency_key,
@@ -533,11 +543,16 @@ class AuthorizedToolService:
                       end_dirty_state: bool | None = None, changed_files: list[str],
                       requested_scope: str, idempotency_key: UUID) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        # Same rule as checkpoint_task: authority comes from the task's project,
+        # never from a caller-declared scope.
+        project_id = store.project_of_task(task_id)
+        if project_id is None:
+            raise BrainError("NOT_FOUND")
         recheck = lambda: self._authority.authorize(
-            context, tool="project.write", scope=requested_scope, sensitivity="private",
+            context, tool="project.write", scope=f"project:{project_id}", sensitivity="private",
         )
         recheck()
-        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
         result = store.finalize_project_task(
             task_id=task_id, outcome=outcome, verification=verification,
             remaining_work=remaining_work, end_revision=end_revision,

@@ -27,7 +27,7 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
                        embedder: Any | None = None, *,
                        llm_daily_quota: int = 200,
                        timezone_name: str = "Asia/Shanghai") -> dict[str, Any]:
-    indexer = SearchIndexer(session_factory, tables, embedder=embedder)
+    indexer = SearchIndexer(session_factory, tables, embedder=embedder, storage=storage)
 
     def index(job, context):
         context.progress(10, "loading canonical source")
@@ -107,6 +107,20 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
             asset_id=asset_id, kind="extracted_text", generator_kind="parser",
             generator_version="bounded-text-parser-v1", transform=lambda content: content,
         )
+        if not result.get("replayed"):
+            # The extracted text is what the asset *says*: without a retrieval
+            # card the whole upload is unsearchable. Enqueue the projection as its
+            # own durable job so a failure is retried and visible, not swallowed.
+            jobs = tables["jobs"]
+            with session_factory.begin() as session:
+                session.execute(jobs.insert().values(
+                    id=uuid4(), owner_id=owner_id, client_id=job.get("client_id"),
+                    job_type="index_derived_content",
+                    payload_ref=f"derived_content:{result['derived_id']}",
+                    idempotency_key=uuid4(), state="queued", priority=0, attempts=0,
+                    max_attempts=5, available_at=datetime.now(timezone.utc), claim_token=0,
+                ))
+            result["index_job"] = "index_derived_content"
         context.progress(100, "derived content committed")
         return result
 
@@ -272,7 +286,7 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
     )
     return {
         "extract_raw_input": extract, "index_raw_input": index, "index_todo": index,
-        "index_self_claim": index, "bootstrap_project": index,
+        "index_self_claim": index, "index_derived_content": index, "bootstrap_project": index,
         "refresh_project_context": index, "parse_asset": parse_asset,
         "reprocess_asset": parse_asset, "notify_review": inbox_only,
         "rebuild_index": index, "reconcile_deletion": reconcile_deletion,

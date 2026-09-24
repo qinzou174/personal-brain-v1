@@ -12,10 +12,14 @@ from personal_brain_infra.search.repository import PostgresSearchRepository
 
 
 class SearchIndexer:
-    def __init__(self, session_factory: Any, tables: Mapping[str, sa.Table], embedder: Any | None = None) -> None:
+    def __init__(self, session_factory: Any, tables: Mapping[str, sa.Table], embedder: Any | None = None,
+                 storage: Any | None = None) -> None:
         self._factory = session_factory
         self._tables = tables
         self._embedder = embedder
+        # Derived payloads (extracted text, transcripts, descriptions) live in
+        # storage rather than in a column, so indexing them needs the backend.
+        self._storage = storage
 
     def handle(self, job: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -72,9 +76,43 @@ class SearchIndexer:
             return self._simple(owner_id, target_id, "self_claims", "claim", "self")
         if target_type in {"decision", "constraint", "change_event"}:
             return self._fact(owner_id, target_type, target_id)
+        if target_type == "derived_content":
+            return self._derived_content(owner_id, target_id)
         if target_type in {"project", "project_task", "checkpoint", "workspace_observation"}:
             return self._project(owner_id, target_type, target_id)
         raise BrainError("VALIDATION_FAILED")
+
+    def _derived_content(self, owner_id: UUID, target_id: UUID) -> dict[str, Any]:
+        """Index an asset-derived payload (its text lives in storage).
+
+        Only asset derivations are handled here: digests are scope-grouped and
+        already index themselves, so re-projecting one from this path could
+        attribute its text to the wrong scope. Without a storage backend the
+        payload cannot be read at all, which is reported instead of guessing.
+        """
+        table = self._tables["derived_contents"]
+        with self._factory() as session:
+            row = session.execute(sa.select(table).where(
+                table.c.id == target_id, table.c.owner_id == owner_id,
+                table.c.lifecycle_state == "active",
+            )).mappings().one_or_none()
+        if row is None:
+            raise BrainError("NOT_FOUND")
+        if self._storage is None:
+            raise BrainError("DEPENDENCY_CONFLICT")
+        if row["target_type"] != "asset" or row["kind"] not in {"extracted_text", "transcript", "description"}:
+            raise BrainError("DEPENDENCY_CONFLICT")
+        try:
+            text = self._storage.read(row["payload_ref"]).decode("utf-8").strip()
+        except (UnicodeDecodeError, OSError) as error:
+            raise BrainError("DEPENDENCY_CONFLICT") from error
+        if not text:
+            raise BrainError("NOT_FOUND")
+        return self._entry(
+            "derived_content", target_id, "asset", row.get("sensitivity", "normal"),
+            "derived", "fresh", text,
+            [f"derived_content:{target_id}", f"asset:{row['source_id']}"],
+        )
 
     def _raw_input(self, owner_id: UUID, target_id: UUID) -> dict[str, Any]:
         raw, intake = self._tables["raw_inputs"], self._tables["intake_requests"]

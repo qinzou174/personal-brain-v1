@@ -160,6 +160,10 @@ class PersistedAuthority:
             scopes.add(scope)
             tools = set(client["allowed_tools"])
             tools.update({"project.read", "project.write"})
+            # No permission-epoch bump here on purpose: the grant is additive and
+            # is read live on every request, so bumping would invalidate the very
+            # OAuth token that just created the project (the token burns the epoch
+            # it was issued with) — and buy nothing in return.
             for tool in ("project.read", "project.write"):
                 exists = session.scalar(sa.select(self._grants.c.id).where(
                     self._grants.c.client_id == context.client_id,
@@ -180,7 +184,6 @@ class PersistedAuthority:
                 self._clients.c.id == context.client_id,
             ).values(
                 scopes=sorted(scopes), allowed_tools=sorted(tools),
-                permission_epoch=int(client["permission_epoch"]) + 1,
             ))
             audit = self._tables.get("audit_events")
             if audit is not None:

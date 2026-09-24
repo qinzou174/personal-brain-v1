@@ -250,6 +250,15 @@ def set_project_access(
         tools = set(client["allowed_tools"])
         if access == "none":
             scopes.discard(scope)
+            # Close the grant rows as well, the way review revocation does: leaving
+            # them open means a scope added back by any other path resurrects the
+            # old authority instead of starting from a fresh grant.
+            session.execute(grants.update().where(
+                grants.c.client_id == client_uuid, grants.c.effect == "allow",
+                grants.c.scope_pattern == scope,
+                grants.c.tool_pattern.in_(("project.read", "project.write")),
+                grants.c.effective_to.is_(None),
+            ).values(effective_to=now))
             action = "revoke_project_access"
         else:
             scopes.add(scope)
@@ -360,6 +369,12 @@ def rebuild_index(factory: Any, tables: Mapping[str, sa.Table], *, batch_limit: 
         ("project_task", "project_tasks", lambda table: sa.true()),
         ("checkpoint", "checkpoints", lambda table: sa.true()),
         ("workspace_observation", "workspace_observations", lambda table: sa.true()),
+        # Asset-derived text is retrievable content too: rebuilding must be able
+        # to restore its cards (digests index themselves by scope and are excluded
+        # here, since this path projects every derivation with the asset scope).
+        ("derived_content", "derived_contents",
+         lambda table: sa.and_(table.c.lifecycle_state == "active",
+                               table.c.target_type == "asset")),
     )
     jobs, owners = tables["jobs"], tables["owners"]
     now = datetime.now(timezone.utc)
@@ -369,6 +384,10 @@ def rebuild_index(factory: Any, tables: Mapping[str, sa.Table], *, batch_limit: 
         for owner_id in owner_ids:
             refs: list[str] = []
             for target_type, table_name, predicate in selectors:
+                if table_name not in tables:
+                    # Partial schemas exist (operator CLI tests, focused fixtures):
+                    # a table that is not deployed simply has nothing to rebuild.
+                    continue
                 table = tables[table_name]
                 refs.extend(
                     f"{target_type}:{row_id}" for row_id in session.scalars(

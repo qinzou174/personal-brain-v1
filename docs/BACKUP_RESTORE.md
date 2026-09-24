@@ -1,6 +1,41 @@
 # Backup and Restore (US10)
 
-## Backup
+## Deployed path (personal-brain-v1-prod, 2026-09-25)
+
+The running stack uses one script and one off-host copy; the US10 acceptance
+scripts below remain as the specification-level reference.
+
+```bash
+# On the deployment host (reads secrets through the containers that own them):
+deploy/scripts/prod-backup.sh          # -> /home/kms/personal-brain-v1-backups/personal-brain-prod-<stamp>.tar.age
+# On the operator machine (off-host copy + sha256 verification):
+uv run python deploy/windows-local/pull_backup.py   # -> E:\Personal-Brain-V1-local\backups\...
+```
+
+- Bundle contents: `database.pg_dump` (pg_dump -Fc from the live server),
+  `data-root.tar.gz` (`/srv/brain/data`), `api-secrets.tar.gz` +
+  `db-secrets.tar.gz` (mounted secret files), `artifacts.sha256`, `manifest.json`.
+- Encryption: `openssl enc -aes-256-cbc -pbkdf2 -iter 200000`; the passphrase is
+  kept in the operator home (`~/.brain-backup-passphrase`, mode 600) and must
+  survive independently of the bundles.
+- Retention: newest 7 bundles on the host, newest 5 on the operator machine.
+- Client credentials are deliberately **not** backed up: re-issue them with
+  `personal_brain_server rotate-client` after a restore.
+
+Restore outline (validated: checksums verified, `pg_restore --list` on the dump
+shows a complete 257-entry archive):
+
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in <bundle>.tar.age \
+  -out bundle.tar -pass file:~/.brain-backup-passphrase
+tar -xf bundle.tar && sha256sum -c artifacts.sha256
+docker exec -i <db-container> pg_restore -U brain -d brain --clean --if-exists < database.pg_dump
+# data root -> the brain-data volume; api/db secrets -> the mounted secret files
+```
+
+## Specification reference (US10 acceptance)
+
+### Backup
 
 - Daily at 02:00 Asia/Shanghai by a single scheduler.
 - Backup includes canonical DB, asset manifest (sha256), Trilium/Git/config and
