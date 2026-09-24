@@ -27,10 +27,16 @@ DEST="${BACKUP_DEST:-/home/kms/personal-brain-v1-backups}"
 KEEP="${BACKUP_KEEP:-7}"
 DB_CONTAINER="${DB_CONTAINER:-personal-brain-v1-prod-db-1}"
 API_CONTAINER="${API_CONTAINER:-personal-brain-v1-prod-api-1}"
-PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-$DATA_DIR/secrets/backup_passphrase}"
+# The passphrase lives in the operator's home (mode 600) — deliberately *not*
+# inside the backup directory, so a copied bundle directory never carries its own
+# key. Generate one on first run; the same file must be kept for restores.
+PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-$HOME/.brain-backup-passphrase}"
 
 if [ ! -s "$PASSPHRASE_FILE" ]; then
-  mkdir -p "$(dirname "$PASSPHRASE_FILE")"
+  if [ -e "$PASSPHRASE_FILE" ]; then
+    echo "backup passphrase exists but is empty/unreadable: $PASSPHRASE_FILE" >&2
+    exit 3
+  fi
   openssl rand -base64 48 > "$PASSPHRASE_FILE"
   chmod 600 "$PASSPHRASE_FILE"
   echo "backup_passphrase_created=$PASSPHRASE_FILE"
