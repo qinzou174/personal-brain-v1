@@ -1,0 +1,95 @@
+---
+name: mcp-personal-brain
+description: 对接 Personal Brain 生产实例（HTTPS + natfrp 隧道）。用于把个人知识/项目/画像写入长期知识库、检索问答、管理项目任务。当用户要"记到个人知识库""问我以前记过什么""把这个项目写进知识库"或任何需要访问 Personal Brain 的 MCP 工具时使用。凭据从环境变量或密钥文件读取，不在本 skill 硬编码。
+---
+
+# MCP-Personal-Brain（个人知识库对接）
+
+Personal Brain V1 生产实例对接说明。核心链路：**任何 MCP 客户端（Trae/Cursor/自研）→ HTTPS 隧道 → nginx → Personal Brain API → PostgreSQL(pgvector)**。
+
+## 0. 端点与凭据（重要：不硬编码）
+
+### 生产端点（服务器 A 同级目录部署）
+```
+Base:   https://www.h2d954063.nyat.app:43086/brain/mcp
+协议:   MCP 2025-11-25 Streamable HTTP
+认证:   Authorization: Bearer <credential>
+版本头: MCP-Protocol-Version: 2025-11-25
+会话:   initialize 后必须回传 MCP-Session-Id（后续请求都带）
+```
+
+### 凭据获取（三选一，禁止写死）
+1. **环境变量** `BRAIN_MCP_CREDENTIAL`——设置后直接使用；
+2. **密钥文件** `E:\Personal-Brain-V1-local\secrets\prod-trial-credential`（本机本地实例）或服务器 `personal-brain-v1-prod-data/secrets/`；
+3. 向用户索要（provision 的新客户端凭据）。
+
+> 安全红线：凭据属于敏感信息，不得写入任何被 git 追踪的文件、日志或 prompt 输出。若环境变量缺失，先检查密钥文件，仍无则询问用户，**不要编造或硬编码**。
+
+## 1. 会话建立（每次新对话/新会话必须先 initialize）
+
+```python
+# 摘自我的探针脚本：deploy/windows-local/mcp_tunnel_smoke.py
+call("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                    "clientInfo": {"name": "my-client", "version": "1"}})
+# 响应头 MCP-Session-Id 必须存下来，后续请求带上
+call("notifications/initialized", {}, None)  # 通知完成初始化
+call("tools/list", {})  # 应返回 30 个工具
+```
+
+## 2. 30 个工具速查（按使用场景分组）
+
+### 日常记录（高频）
+- `save_note(content, requested_scope="knowledge", idempotency_key)` — 记笔记/日记/知识，原样入库并自动向量化
+- `add_expense(amount, currency, category, description, occurred_timezone, requested_scope="finance", idempotency_key)` — 记账（金额走精确 SQL，不要用语义搜索代替）
+- `add_todo(content, requested_scope="todo", idempotency_key[, priority])` / `complete_todo(todo_id, expected_version, ...)` / `list_todos`
+- `list_expense_records` / `get_expense_summary([currency])`
+
+### 检索问答（高频）
+- `search_brain(query, requested_scope, sensitivity_ceiling="private", limit)` — 混合检索（FTS+向量+排序），返回带 `ranking_reasons`
+- `answer_brain(query, requested_scope, ...)` — **仅凭库内证据回答**，grounded=True；无证据时明确答"无法确认"
+- `get_brain_context(intent, requested_scope, detail, budget)` — 拿到上下文包（intent 需是真实检索意图词，传 "general" 会空）
+
+### 自我画像
+- `get_self_context(categories, requested_scope="self")` — 查看画像 claims
+- `propose_self_claim(category, claim_text, policy_class=A/B/C, requested_scope="self", idempotency_key)` — A=记下，B=候选，C=待用户确认（重大价值观）
+
+### 项目工作流
+- `create_project` / `record_decision` / `record_constraint` / `start_task` / `checkpoint_task` / `finalize_task` / `get_project_context` / `get_active_task` / `get_module_context` / `get_recent_changes` / `check_freshness` / `search_project`
+
+### 治理/资产（低频）
+- `upload_asset`（source_id 必须指向已有 active raw_input，否则 NOT_FOUND——血缘设计）
+- `create_deletion_plan`（高风险确认门禁，返回 CONFIRMATION_REQUIRED 是正常语义）
+- `create_review_item` / `get_operation_status`（正常路径用真实 operation_id）/ `sync_workspace`（仅 bridge 客户端）
+
+## 3. 边界与错误码（对接必备）
+
+| 错误 | 含义 | 处理 |
+|------|------|------|
+| AUTH_INVALID | 凭据/session 无效 | 重新 provision/确认凭据，重开会话 |
+| SCOPE_DENIED | 该 scope 无授权 | 用正确的 requested_scope（账目=finance，项目=projects，知识=knowledge） |
+| VALIDATION_FAILED | 参数不合 schema | 检查必填空值；**不要传 schema 之外的字段**（additionalProperties:false） |
+| NOT_FOUND | 目标不存在 | 查询不存在的 id 时是诚实语义，如 get_module_context 对未注册模块 |
+| CONFIRMATION_REQUIRED | 高风险操作需确认 | 理解这是门禁，不是失败 |
+| TOOL_DENIED | 模型网关未配置 | 环境缺 Ark key |
+
+关键约定（踩坑总结）：
+- **记账/待办是结构化数据**：问"花了多少钱"走 finance SQL 精确路径；不要在 knowledge scope 里搜账目（账目只索引在 finance scope）。
+- **idempotency_key 必须每次传新 uuid**：幂等闸门，重发同一 key 返回原结果不重复入库。
+- **checkpoint_task/finalize_task 的可选参数**（revision/end_revision/end_dirty_state）不传是合法的——契约已对齐。
+- **删除/审查类要过确认门禁**：这是 ER-06 设计，不是 bug。
+
+## 4. 快速探测（验证链路，参考脚本）
+
+```bash
+# Windows 本机探针（需 uv/python）
+uv run python deploy/windows-local/mcp_tunnel_smoke.py   # 30 工具
+uv run python deploy/windows-local/mcp_tunnel_exec.py    # 实测写入一条
+```
+
+## 5. 服务器侧部署路径（只读参考，勿随意改）
+
+- 代码：`/home/kms/personal-brain-v1-prod`（与 A、nas 同级）
+- compose：`deploy/compose.prod.yaml`（project=personal-brain-v1-prod，端口 18083）
+- 密钥：`/home/kms/personal-brain-v1-prod-data/secrets/`（db_dsn / db_password / token_pepper / model_api_key）
+- nginx：`/etc/nginx/conf.d/wangzhan1.conf` 的 `location /brain/mcp` → `192.168.10.7:18083/mcp`
+- 隧道：natfrp wangzhan1 隧道 → `www.h2d954063.nyat.app:43086` → 本机 nginx

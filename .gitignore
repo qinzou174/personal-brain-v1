@@ -57,6 +57,7 @@ deploy/windows-local/inspect_auth.py
 deploy/windows-local/server_exec.py
 deploy/windows-local/server_deploy.py
 deploy/windows-local/sync_to_server.py
+deploy/windows-local/*.sh
 .git-commit-msg.txt
 
 # Tooling backup artifacts

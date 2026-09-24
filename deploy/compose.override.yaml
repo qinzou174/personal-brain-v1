@@ -1,0 +1,21 @@
+# compose.override.yaml — prod 空库独立栈（与旧 LAN 栈并行）
+# 目录 /home/kms/personal-brain-v1-prod（与 A/nas 同级），以 -p personal-brain-v1-prod 启动
+# 端口 18083；named volumes 按 project 名自动隔离；model-proxy socket 目录独立；
+# 镜像复用 runtime:local 但需在本目录重建（含最新修复）。Ark key 复用旧栈密钥文件。
+name: personal-brain-v1-prod
+
+services:
+  model-proxy:
+    volumes:
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+  api:
+    ports: !reset
+      - "192.168.10.7:18083:18083"
+    environment:
+      BRAIN_BIND_PORT: "18083"
+      BRAIN_PUBLISHED_HOST: 192.168.10.7
+    volumes:
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+  worker:
+    volumes:
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
