@@ -89,7 +89,25 @@ class PostgresSearchRepository:
         semantic_ids = [row["id"] for row in semantic_rows]
         scores = rrf_fuse(keyword_rank=keyword_ids, semantic_rank=semantic_ids)
         by_id = {row["id"]: row for row in [*keyword_rows, *semantic_rows]}
-        ranked = sorted(scores, key=lambda item: (-scores[item], str(item)))[:limit]
+
+        def _length_penalty(row: Mapping[str, Any]) -> float:
+            """Weight short, precise records above long multi-topic documents.
+
+            jieba search-mode tokenization splits short phrases (拿铁 -> 拿/铁),
+            so keyword rank favors longer documents that OR-match more segments;
+            whole-document embeddings likewise average long archives across many
+            topics. Without a length term, personal archives drown out exact
+            diary/expense records (O2). Penalty is monotone and capped (>= 0.1).
+            """
+            length = len(row.get("searchable_text") or "")
+            if length <= 400:
+                return 1.0
+            return max(0.1, 400.0 / length)
+
+        ranked = sorted(
+            scores,
+            key=lambda item: (-(scores[item] * _length_penalty(by_id[item])), str(item)),
+        )[:limit]
         results = []
         for entry_id in ranked:
             row = by_id[entry_id]

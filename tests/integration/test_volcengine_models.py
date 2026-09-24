@@ -1,5 +1,6 @@
 """Protocol and grounding tests for the configured Ark model adapters."""
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -30,6 +31,48 @@ def test_anthropic_compatible_provider_uses_messages_protocol_without_exposing_k
     assert observed == {"path": "/api/coding/v1/messages", "has_key": True}
     assert result["text"] == "仅依据证据回答。"
     assert "fixture-value" not in repr(provider) and "fixture-value" not in repr(result)
+
+
+def test_anthropic_compatible_provider_disables_thinking_by_default_and_allows_override():
+    from personal_brain_infra.models.volcengine import AnthropicCompatibleProvider
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["thinking"] = json.loads(request.content).get("thinking")
+        return httpx.Response(200, json={
+            "model": "deepseek-v4.1-flash", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "好。"}], "usage": {},
+        })
+
+    provider = AnthropicCompatibleProvider(
+        "https://ark.cn-beijing.volces.com/api/coding", SecretStr("fixture-value"),
+        "deepseek-v4.1-flash", transport=httpx.MockTransport(handler),
+    )
+    provider({"request": {"prompt": "问"}, "context": {}})
+    assert seen["thinking"] == {"type": "disabled"}
+
+    provider({"request": {"prompt": "问", "thinking": {"type": "enabled", "budget_tokens": 1024}}, "context": {}})
+    assert seen["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_anthropic_compatible_provider_fails_when_thinking_eats_all_tokens():
+    """Regression: reasoning-only response (stop_reason=max_tokens, no text) must
+    surface as BRAIN_UNAVAILABLE instead of an empty answer."""
+    from personal_brain_domain.common.errors import BrainError
+    from personal_brain_infra.models.volcengine import AnthropicCompatibleProvider
+
+    provider = AnthropicCompatibleProvider(
+        "https://ark.cn-beijing.volces.com/api/coding", SecretStr("fixture-value"),
+        "deepseek-v4.1-flash",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={
+            "model": "deepseek-v4.1-flash", "stop_reason": "max_tokens",
+            "content": [{"type": "thinking", "thinking": "很长的思考……"}], "usage": {},
+        })),
+    )
+    with pytest.raises(BrainError) as caught:
+        provider({"request": {"prompt": "问", "thinking": {"type": "enabled"}}, "context": {}})
+    assert caught.value.code == "BRAIN_UNAVAILABLE"
 
 
 def test_embedding_provider_uses_multimodal_protocol_and_validates_dimensions():

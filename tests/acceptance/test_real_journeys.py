@@ -295,3 +295,45 @@ def test_J09_offline_honesty(seeded):
                     action="submit mutation; durable queue evidence", observed="honest accepted status",
                     refs=("test_full_chain_postgresql.py::test_full_chain_upgrade_postvalidation_and_reverse_downgrade",))
     assert RUN_ID
+
+
+def test_index_job_tolerates_version_change_between_fences(seeded):
+    """F1 regression: add_todo -> complete_todo within the index-job window must
+    not dead-letter the index job. Index jobs re-read the row at execution time,
+    so a version bump between before_execute and before_commit is harmless for
+    the index_* family, while write jobs keep the original VERSION_CONFLICT gate.
+    """
+    from personal_brain_worker.job_handlers import build_job_recheck
+    from personal_brain_worker.runtime import JobExecutionError
+
+    h = seeded
+    store = _store(h)
+    # create a todo like add_todo would
+    todo = store.add_todo(content="快速流转待办", requested_scope="todo",
+                          idempotency_key=uuid4())
+    todo_id = UUID(todo["todo_id"])
+
+    recheck = build_job_recheck(h.factory, h.tables)
+    job = {"id": str(uuid4()), "job_type": "index_todo", "payload_ref": f"todo:{todo_id}",
+           "owner_id": h.owner_id, "client_id": h.client_id}
+    recheck(job, "before_execute")
+    # simulate complete_todo bumping version between fences
+    with h.factory.begin() as session:
+        session.execute(sa.text(
+            "update todos set version = version + 1, state='completed' where id = :tid"
+        ).bindparams(sa.bindparam("tid", todo_id)))
+    recheck(job, "before_commit")  # must NOT raise for index_todo
+
+    # control: a write job watching the same row still rejects on version drift
+    write_job = {"id": str(uuid4()), "job_type": "refresh_project_context",
+                 "payload_ref": f"todo:{todo_id}", "owner_id": h.owner_id, "client_id": h.client_id}
+    recheck2 = build_job_recheck(h.factory, h.tables)
+    recheck2(write_job, "before_execute")
+    with h.factory.begin() as session:
+        session.execute(sa.text(
+            "update todos set version = version + 1 where id = :tid"
+        ).bindparams(sa.bindparam("tid", todo_id)))
+    with pytest.raises(JobExecutionError) as caught:
+        recheck2(write_job, "before_commit")
+    assert caught.value.code == "VERSION_CONFLICT"
+    assert RUN_ID

@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-09-24T13:11:39+0800",
+  "target": "http://127.0.0.1:18082/mcp (live local instance, real models activated)",
+  "query": "西湖",
+  "measurements": {
+    "search_brain_semantic_generated": {
+      "samples": 30,
+      "errors": 0,
+      "p50_ms": 575.02,
+      "p95_ms": 682.53,
+      "mean_ms": 591.81,
+      "max_ms": 768.28
+    },
+    "search_brain_pure_db_provided": {
+      "samples": 30,
+      "errors": 0,
+      "p50_ms": 125.66,
+      "p95_ms": 142.76,
+      "mean_ms": 128.52,
+      "max_ms": 145.26
+    },
+    "answer_brain_llm_e2e": {
+      "samples": 5,
+      "errors": 0,
+      "p50_ms": 3026.82,
+      "p95_ms": 3111.71,
+      "mean_ms": 3245.68,
+      "max_ms": 4272.85
+    },
+    "save_note_write_reference": {
+      "samples": 10,
+      "errors": 0,
+      "p50_ms": 206.83,
+      "p95_ms": 230.92,
+      "mean_ms": 231.66,
+      "max_ms": 438.43
+    }
+  },
+  "semantic_statuses_seen": [
+    "generated"
+  ],
+  "answer_sample": "根据知识库，与“西湖”相关的记录只有一条：\n\n> 今天去了杭州，西湖人挺多但晚霞超美。\n\n除此之外，知识库中没有更多关于",
+  "note": "semantic vs pure_db contrast isolates the vector-model in-path cost; answer_brain includes evidence retrieval + one LLM call per sample."
+}

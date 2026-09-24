@@ -47,6 +47,15 @@ class AnthropicCompatibleProvider:
             "max_tokens": min(max(int(request.get("max_tokens", 1024)), 1), 4096),
             "messages": messages,
         }
+        thinking = request.get("thinking")
+        if thinking is None:
+            # Reasoning-class models (deepseek-v4.1) otherwise burn the whole
+            # token budget on the internal thinking block, returning an empty
+            # text block (stop_reason=max_tokens) that surfaces as
+            # BRAIN_UNAVAILABLE. Evidence-backed answers do not need that
+            # internal reasoning; callers may still opt in via request.
+            thinking = {"type": "disabled"}
+        body["thinking"] = thinking
         system = request.get("system")
         if system:
             body["system"] = str(system)

@@ -58,3 +58,10 @@ deploy/windows-local/server_exec.py
 deploy/windows-local/server_deploy.py
 deploy/windows-local/sync_to_server.py
 .git-commit-msg.txt
+
+# Tooling backup artifacts
+.bak-*/
+
+# Loop-testing sandbox runtime state
+docs/looptesting/.sandbox/
+docs/looptesting/.pids

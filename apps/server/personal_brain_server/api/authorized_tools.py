@@ -393,7 +393,7 @@ class AuthorizedToolService:
         return result
 
     def checkpoint_task(self, *, credential: str, task_id: UUID, completed_work: str,
-                        next_step: str, problems: str, revision: str | None,
+                        next_step: str, problems: str, revision: str | None = None,
                         requested_scope: str, idempotency_key: UUID,
                         dirty_files: list[str] | None = None, changed_files: list[str] | None = None,
                         decisions: list[str] | None = None,
@@ -502,8 +502,8 @@ class AuthorizedToolService:
         return result
 
     def finalize_task(self, *, credential: str, task_id: UUID, outcome: str,
-                      verification: str, remaining_work: str, end_revision: str | None,
-                      end_dirty_state: bool | None, changed_files: list[str],
+                      verification: str, remaining_work: str, end_revision: str | None = None,
+                      end_dirty_state: bool | None = None, changed_files: list[str],
                       requested_scope: str, idempotency_key: UUID) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
         recheck = lambda: self._authority.authorize(

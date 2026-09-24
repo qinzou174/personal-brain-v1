@@ -213,6 +213,15 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
 def build_job_recheck(session_factory: Any, tables: Mapping[str, sa.Table]):
     """Recheck client revocation, secret admission and target version at both fences."""
     observed_versions: dict[str, Any] = {}
+    # Index jobs re-read the target row at execution time (SearchIndexer._raw_input
+    # / _simple / _project), so a version change between fences is harmless: the
+    # index always reflects the latest state. Exempt only the index_* family;
+    # every other job keeps the original version fencing.
+    VERSION_EXEMPT = frozenset({
+        "index_raw_input", "index_todo", "index_self_claim",
+        "index_project", "index_project_task", "index_checkpoint",
+        "index_workspace_observation",
+    })
     target_tables = {
         "raw_input": "raw_inputs", "todo": "todos", "self_claim": "self_claims",
         "project": "projects", "project_task": "project_tasks", "checkpoint": "checkpoints",
@@ -251,12 +260,13 @@ def build_job_recheck(session_factory: Any, tables: Mapping[str, sa.Table]):
             marker = session.scalar(sa.select(marker_column).where(
                 table.c.id == target_id, table.c.owner_id == job["owner_id"],
             ))
-        if marker is None:
-            raise JobExecutionError("NOT_FOUND", retryable=False)
-        key = str(job["id"])
-        if phase == "before_execute":
-            observed_versions[key] = marker
-        elif observed_versions.get(key) != marker:
-            raise JobExecutionError("VERSION_CONFLICT", retryable=False)
+            if marker is None:
+                raise JobExecutionError("NOT_FOUND", retryable=False)
+            key = str(job["id"])
+            if phase == "before_execute":
+                observed_versions[key] = marker
+            elif (observed_versions.get(key) != marker
+                  and job.get("job_type") not in VERSION_EXEMPT):
+                raise JobExecutionError("VERSION_CONFLICT", retryable=False)
 
     return recheck

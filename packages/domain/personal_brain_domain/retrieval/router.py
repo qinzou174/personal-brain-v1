@@ -2,11 +2,14 @@
 
 FR-020/FR-056: exact structured questions route to deterministic lookup before
 any probabilistic retrieval; permission/scope denial happens before any search
-or index access.
+or index access. ER-04: money intent requires an explicit money cue — bare
+substrings like "花了" (spent time/mind) or "total" (total time/people) must
+not route into the exact finance path.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 _EXACT_INTENTS = frozenset({
@@ -20,11 +23,23 @@ class RouteDecision:
     denied: bool = False
 
 
+_EXPENSE_PATTERNS = (
+    re.compile(r"总额|总支出|总开销|总花费|费用汇总|开销"),
+    re.compile(r"多少钱|多少元"),
+    re.compile(r"花.{0,4}(钱|元|块|¥)"),
+    re.compile(r"expense|money"),
+    re.compile(r"total\s+(amount|expense|cost|money|spend\w*)"),
+)
+_TODO_PATTERNS = (
+    re.compile(r"待办|任务清单|todo"),
+)
+
+
 def classify_intent(text: str) -> str:
     lowered = text.lower()
-    if any(keyword in lowered for keyword in ("总额", "花了", "多少钱", "expense", "total")):
+    if any(pattern.search(lowered) for pattern in _EXPENSE_PATTERNS):
         return "expense_total"
-    if any(keyword in lowered for keyword in ("待办", "todo", "任务清单")):
+    if any(pattern.search(lowered) for pattern in _TODO_PATTERNS):
         return "todo_list"
     return "fuzzy_idea"
 
