@@ -281,6 +281,10 @@ def main(argv: list[str] | None = None) -> int:
             readiness_probe=readiness,
             protocol_router=protocol_router,
             doctor_probe=build_doctor_probe(engine, settings.data_root),
+            endpoint_token=(
+                read_secret_file(settings.endpoint_token_file).get_secret_value().strip()
+                if settings.endpoint_token_file else None
+            ),
         )
         uvicorn.run(app, host=str(settings.bind_host), port=settings.bind_port, access_log=True)
         engine.dispose()

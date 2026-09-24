@@ -94,6 +94,59 @@ def test_doctor_endpoint_reports_components_without_collapsing_http():
         assert body["metrics"]["failed_jobs"] == 0
 
 
+def test_endpoint_token_gates_the_ops_probes():
+    """With BRAIN_ENDPOINT_TOKEN configured, anonymous callers get only the
+    one-bit aggregate — disk/jobs/asset detail requires the bearer token."""
+    from personal_brain_server.runtime import create_app
+
+    probes = dict(
+        readiness_probe=lambda: {"ready": True, "database": "ok", "worker": "ok", "storage": "ok"},
+        doctor_probe=lambda: {
+            "overall": "healthy",
+            "components": {"disk": "healthy", "jobs": "healthy"},
+            "findings": [],
+            "metrics": {"disk_free_percent": 42.0, "failed_jobs": 0,
+                        "corrupted_assets": 0, "broken_relations": 0},
+        },
+    )
+    app = create_app(**probes, endpoint_token="secret-token")
+    with TestClient(app) as client:
+        anonymous = client.get("/doctor")
+        assert anonymous.status_code == 200
+        assert anonymous.json() == {"overall": "healthy"}  # aggregate only
+
+        assert client.get("/doctor", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+        full = client.get("/doctor", headers={"Authorization": "Bearer secret-token"})
+        assert full.status_code == 200
+        assert full.json()["metrics"]["disk_free_percent"] == 42.0
+
+        ready_anon = client.get("/ready")
+        assert ready_anon.status_code == 200
+        assert ready_anon.json() == {"ready": True}
+
+        ready_full = client.get("/ready", headers={"Authorization": "Bearer secret-token"})
+        assert ready_full.json()["database"] == "ok"
+
+        assert client.get("/health").json() == {"status": "alive"}  # liveness stays open
+
+
+def test_ready_endpoint_reports_503_with_the_gate_still_applied():
+    from personal_brain_server.runtime import create_app
+
+    app = create_app(
+        readiness_probe=lambda: {"ready": False, "database": "failed"},
+        endpoint_token="secret-token",
+    )
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 503
+        assert response.json() == {"ready": False}  # detail requires the token
+        gated = client.get("/ready", headers={"Authorization": "Bearer secret-token"})
+        assert gated.status_code == 503
+        assert gated.json()["database"] == "failed"
+
+
 def test_doctor_endpoint_is_not_checked_when_no_probe_injected():
     from personal_brain_server.runtime import create_app
 

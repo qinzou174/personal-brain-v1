@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 import sqlalchemy as sa
-from fastapi import APIRouter, FastAPI, Response
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Response
 
 from personal_brain_domain.operations.doctor import aggregate_health, check_components
 from personal_brain_server.bootstrap.preflight import preflight_report
@@ -128,7 +128,19 @@ def build_doctor_probe(engine: sa.Engine, data_root: Path) -> DoctorProbe:
 
 
 def create_app(*, readiness_probe: ReadinessProbe, protocol_router: APIRouter | None = None,
-               doctor_probe: DoctorProbe | None = None) -> FastAPI:
+               doctor_probe: DoctorProbe | None = None,
+               endpoint_token: str | None = None) -> FastAPI:
+    """ASGI app with optionally gated ops endpoints.
+
+    ``endpoint_token`` (from BRAIN_ENDPOINT_TOKEN_FILE in production) guards the
+    two probes that expose runtime details.  Without it — local development —
+    the full body is returned; with it, anonymous callers receive only the
+    one-bit aggregate and the token unlocks the full report.
+    """
+
+    def _authorized(authorization: str | None) -> bool:
+        return endpoint_token is None or authorization == f"Bearer {endpoint_token}"
+
     app = FastAPI(title="Personal Brain V1", docs_url=None, redoc_url=None)
     if protocol_router is not None:
         app.include_router(protocol_router)
@@ -138,16 +150,27 @@ def create_app(*, readiness_probe: ReadinessProbe, protocol_router: APIRouter | 
         return {"status": "alive"}
 
     @app.get("/doctor")
-    def doctor() -> dict[str, object]:
+    def doctor(authorization: str | None = Header(default=None)) -> dict[str, object]:
         if doctor_probe is None:
             return {"overall": "not_checked", "components": {}, "findings": []}
-        return doctor_probe()
+        report = doctor_probe()
+        if not _authorized(authorization):
+            if authorization is None:
+                # Anonymous: only the one-bit aggregate — no disk/jobs/asset detail.
+                return {"overall": report.get("overall", "unknown")}
+            raise HTTPException(status_code=401, detail="AUTH_INVALID")
+        return report
 
     @app.get("/ready")
-    def ready(response: Response) -> dict[str, object]:
+    def ready(response: Response, authorization: str | None = Header(default=None)) -> dict[str, object]:
         report = readiness_probe()
-        if not report.get("ready"):
+        ready_flag = bool(report.get("ready"))
+        if not ready_flag:
             response.status_code = 503
+        if not _authorized(authorization):
+            if authorization is None:
+                return {"ready": ready_flag}
+            raise HTTPException(status_code=401, detail="AUTH_INVALID")
         return report
 
     return app

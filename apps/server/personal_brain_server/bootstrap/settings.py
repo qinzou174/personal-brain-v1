@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     data_root: Path
     database_dsn_file: Path = Field(repr=False, exclude=True)
     token_pepper_file: Path = Field(repr=False, exclude=True)
+    # Optional bearer token guarding /doctor and /ready.  When set, anonymous
+    # callers only get the one-bit aggregate (overall/ready); the token unlocks
+    # the full metrics.  Unset keeps the local-development behaviour (full body).
+    endpoint_token_file: Path | None = Field(default=None, repr=False, exclude=True)
     default_timezone: str = "Asia/Shanghai"
     default_currency: str = "CNY"
     external_models_enabled: bool = False
@@ -58,7 +62,7 @@ class Settings(BaseSettings):
     # proxy; without it the LAN endpoint is advertised.
     public_base_url: str | None = None
 
-    @field_validator("data_root", "database_dsn_file", "token_pepper_file", "model_api_key_file", "model_proxy_socket")
+    @field_validator("data_root", "database_dsn_file", "token_pepper_file", "model_api_key_file", "model_proxy_socket", "endpoint_token_file")
     @classmethod
     def require_absolute_path(cls, value: Path | None) -> Path | None:
         if value is None:
