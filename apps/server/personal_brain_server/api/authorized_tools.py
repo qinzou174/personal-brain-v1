@@ -373,6 +373,28 @@ class AuthorizedToolService:
         result = store.create_project(name=name, purpose=purpose, requested_scope=requested_scope,
                                       idempotency_key=idempotency_key, pre_commit=recheck)
         recheck()
+        # Creator self-grant (last, after the final recheck): without a
+        # project:<id> scope grant the freshly created project would be an
+        # orphan — visible to nobody, readable by nobody, deletable by nobody.
+        # Performed after the recheck so the mid-request epoch bump does not
+        # trip the policy's stale-epoch guard; the client re-authenticates on
+        # its next request and holds the new epoch.
+        grant = getattr(self._authority, "grant_project_scope", None)
+        if grant is not None and result.get("project_id"):
+            grant(context, project_id=UUID(result["project_id"]))
+        return result
+
+    def list_projects(self, *, credential: str) -> dict[str, Any]:
+        """Discover the owner's projects (previously impossible: creation had
+        no enumeration, so a client could never find what it had built)."""
+        context = self._authority.authenticate(credential)
+        recheck = lambda: self._authority.authorize(
+            context, tool="project.read", scope="projects", sensitivity="private",
+        )
+        recheck()
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        result = store.list_projects()
+        recheck()
         return result
 
     def start_task(self, *, credential: str, project_id: UUID, goal: str, revision: str,

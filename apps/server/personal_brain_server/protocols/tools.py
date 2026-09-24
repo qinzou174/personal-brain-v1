@@ -41,6 +41,9 @@ FR099_TOOL_NAMES = frozenset({
     # a client — a plan or merge candidate could be created but never seen or
     # approved. The surface grows 30 -> 32.
     "list_review_items", "resolve_review_item",
+    # D-projects 2026-09-25: creation had no discovery — a client could never
+    # enumerate the projects it had built. The surface grows 32 -> 33.
+    "list_projects",
 })
 
 _UUID = {"type": "string", "format": "uuid"}
@@ -138,6 +141,7 @@ _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
     "resolve_review_item": _schema(("item_id", "expected_version", "decision", "idempotency_key"),
                                    item_id=_UUID, expected_version={"type": "integer", "minimum": 1},
                                    decision={"enum": ["approved", "rejected"]}, idempotency_key=_UUID),
+    "list_projects": _schema(),
 }
 
 

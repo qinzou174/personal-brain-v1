@@ -29,7 +29,7 @@ DEFAULT_TOOLS = (
     "knowledge.write", "knowledge.read", "search.read", "context.read",
     "finance.write", "finance.read",
     "todo.write", "todo.read", "self.write", "self.read", "asset.write",
-    "review.write", "review.read", "operation.read", "project.write",
+    "review.write", "review.read", "operation.read", "project.write", "project.read",
 )
 _TOOL_SCOPES: dict[str, tuple[str, ...]] = {
     "knowledge.write": ("knowledge",), "knowledge.read": ("knowledge",),
@@ -39,6 +39,9 @@ _TOOL_SCOPES: dict[str, tuple[str, ...]] = {
     "self.write": ("self",), "self.read": ("self",), "asset.write": ("asset",),
     "review.write": ("review",), "review.read": ("review",),
     "operation.read": ("operations",), "project.write": ("projects",),
+    # Scope-level project read powers list_projects (discovery); per-project
+    # scopes are granted by the creator self-grant / project-access command.
+    "project.read": ("projects",),
 }
 # D1, 2026-09-25: governance tools (``create_deletion_plan`` /
 # ``create_review_item``) authorize the *data* scope that owns the targets, so

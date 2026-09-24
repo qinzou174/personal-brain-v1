@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 import sqlalchemy as sa
 from argon2 import PasswordHasher
@@ -29,6 +30,7 @@ class PersistedAuthority:
         if not required <= set(tables):
             raise RuntimeError(f"authority schema missing tables: {sorted(required - set(tables))}")
         self._factory = session_factory
+        self._tables = tables
         self._clients = tables["clients"]
         self._credentials = tables["credentials"]
         self._grants = tables["permission_grants"]
@@ -131,6 +133,65 @@ class PersistedAuthority:
             now=moment,
             risk=risk,
         )
+
+
+    def grant_project_scope(self, context: AuthorityContext, *, project_id: Any,
+                            now: datetime | None = None) -> dict[str, Any]:
+        """Creator self-grant after a successful ``create_project``.
+
+        Without this the creator holds ``project.write`` on the *collection*
+        scope but nothing on the new ``project:<id>`` scope, so every later
+        read or write on their own project is denied — a structurally orphaned
+        project. The grant is idempotent, audited, permission-epoch bumped and
+        revocable through the operator ``project-access`` command.
+        """
+        moment = now or datetime.now(timezone.utc)
+        scope = f"project:{project_id}"
+        with self._factory.begin() as session:
+            client = session.execute(
+                sa.select(self._clients).where(
+                    self._clients.c.id == context.client_id,
+                    self._clients.c.owner_id == context.owner_id,
+                )
+            ).mappings().one_or_none()
+            if client is None:
+                raise BrainError("AUTH_INVALID")
+            scopes = set(client["scopes"])
+            scopes.add(scope)
+            tools = set(client["allowed_tools"])
+            tools.update({"project.read", "project.write"})
+            for tool in ("project.read", "project.write"):
+                exists = session.scalar(sa.select(self._grants.c.id).where(
+                    self._grants.c.client_id == context.client_id,
+                    self._grants.c.effect == "allow",
+                    self._grants.c.scope_pattern == scope,
+                    self._grants.c.tool_pattern == tool,
+                    self._grants.c.effective_to.is_(None),
+                ))
+                if exists is None:
+                    session.execute(self._grants.insert().values(
+                        id=uuid4(), client_id=context.client_id, effect="allow",
+                        scope_pattern=scope, tool_pattern=tool,
+                        sensitivity_ceiling="private", effective_from=moment,
+                        effective_to=None, issuer="creator_self_grant",
+                        reason="project created by this client",
+                    ))
+            session.execute(self._clients.update().where(
+                self._clients.c.id == context.client_id,
+            ).values(
+                scopes=sorted(scopes), allowed_tools=sorted(tools),
+                permission_epoch=int(client["permission_epoch"]) + 1,
+            ))
+            audit = self._tables.get("audit_events")
+            if audit is not None:
+                session.execute(audit.insert().values(
+                    id=uuid4(), owner_id=context.owner_id, client_id=context.client_id,
+                    correlation_id=uuid4(), action="creator_project_grant", tool="operator.cli",
+                    effective_scope=scope, target_category="project", target_id=project_id,
+                    outcome="completed", error_code=None, duration_ms=0, occurred_at=moment,
+                    risk="broad_permission_change", authorization_decision="creator_self_service",
+                ))
+        return {"scope": scope, "tools": ["project.read", "project.write"]}
 
 
 class AuthorizationPipeline:

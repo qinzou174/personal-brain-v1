@@ -1,0 +1,185 @@
+"""D-projects 2026-09-25: the projects channel must work end to end from a client.
+
+Historical breakage: ``project.read`` was missing from the default tool profile
+(every read tool TOOL_DENIED), per-project scopes were never granted on create
+(every write SCOPE_DENIED — an orphaned project), deletion had no review grant
+on the projects scope, and there was no way to enumerate projects at all.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import pytest
+
+from activation_support import build_harness
+
+
+@pytest.fixture(scope="module")
+def harness(tmp_path_factory):
+    h = build_harness(tmp_path_factory)
+    yield h
+    h.drop_schema()
+
+
+def _service(harness):
+    """Real provisioning + real AuthorizedToolService bound to a real credential."""
+    from pathlib import Path
+
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+    from personal_brain_infra.search.repository import PostgresSearchRepository
+    from personal_brain_infra.security.authority import PersistedAuthority
+    from personal_brain_server.admin import provision_client
+    from personal_brain_server.api.authorized_tools import AuthorizedToolService
+
+    credential_file = Path(harness.data_root) / f"projects-client-{uuid4().hex[:8]}.credential"
+    provisioned = provision_client(
+        harness.factory, harness.tables, display_name=f"projects-{uuid4().hex[:8]}",
+        client_type="mobile", credential_file=credential_file,
+    )
+    token = credential_file.read_text(encoding="utf-8").strip()
+    authority = PersistedAuthority(harness.factory, harness.tables)
+    service = AuthorizedToolService(
+        authority,
+        lambda *, owner_id, client_id: AuthoritativeStore(
+            harness.factory, owner_id=owner_id, client_id=client_id,
+        ),
+        search_factory=lambda *, owner_id: PostgresSearchRepository(
+            harness.factory, harness.tables["search_index_entries"], owner_id=owner_id,
+        ),
+    )
+    return service, token, provisioned
+
+
+def test_create_then_read_write_and_discover_own_project(harness):
+    service, token, _provisioned = _service(harness)
+
+    created = service.create_project(
+        credential=token, name="通道验证", purpose="projects channel end to end",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    project_id = created["project_id"]
+
+    # Creator self-grant: the same client reads its own project back.
+    recovery = service.get_project_context(credential=token, project_id=project_id)
+    assert recovery["project"]["project_id"] == project_id
+    assert recovery["project"]["name"] == "通道验证"
+
+    listing = service.list_projects(credential=token)
+    assert project_id in {row["project_id"] for row in listing["projects"]}
+
+    decision = service.record_decision(
+        credential=token, project_id=project_id, statement="用恢复视图而不重建",
+        rationale="原始记录是唯一权威", affected_modules=["recovery"],
+        idempotency_key=uuid4(),
+    )
+    assert decision["status"] == "accepted"
+    constraint = service.record_constraint(
+        credential=token, project_id=project_id, statement="不删除原始记录",
+        rationale="ER 事实规则", affected_modules=["recovery"],
+        idempotency_key=uuid4(),
+    )
+    assert constraint["status"] == "accepted"
+
+    recovery = service.get_project_context(credential=token, project_id=project_id)
+    assert [row["statement"] for row in recovery["decisions"]] == ["用恢复视图而不重建"]
+    assert [row["statement"] for row in recovery["constraints"]] == ["不删除原始记录"]
+
+    found = service.search_project(credential=token, project_id=project_id, query="恢复视图")
+    assert found["authority"] in {"exact", "hybrid"}
+    changes = service.get_recent_changes(credential=token, project_id=project_id)
+    assert "change_events" in changes
+    freshness = service.check_freshness(credential=token, project_id=project_id)
+    assert freshness["fresh"] is True  # no module cards yet: nothing is stale
+    # Authorization passed; with no modules registered the lookup is NOT_FOUND.
+    from personal_brain_domain.common.errors import BrainError
+
+    with pytest.raises(BrainError) as missing:
+        service.get_module_context(credential=token, project_id=project_id, module_name="无")
+    assert missing.value.code == "NOT_FOUND"
+
+
+def test_task_lifecycle_start_checkpoint_finalize(harness):
+    service, token, _provisioned = _service(harness)
+    project_id = service.create_project(
+        credential=token, name="任务流验证", purpose="start-checkpoint-finalize",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+
+    started = service.start_task(
+        credential=token, project_id=project_id, goal="打通任务链", revision="r1",
+        dirty_state=False, constraints=["不动原始记录"], idempotency_key=uuid4(),
+    )
+    task_id = started["task_id"]
+    service.checkpoint_task(
+        credential=token, task_id=task_id, completed_work="完成读写验证",
+        next_step="收尾", problems="无", revision="r2", requested_scope=f"project:{project_id}",
+        idempotency_key=uuid4(),
+    )
+    # Checkpoints are readable while the task is still active.
+    active_view = service.get_project_context(credential=token, project_id=project_id)
+    assert active_view["active_task"]["task_id"] == task_id
+    assert active_view["checkpoints"][-1]["completed_work"] == "完成读写验证"
+    finished = service.finalize_task(
+        credential=token, task_id=task_id, outcome="completed",
+        verification="恢复视图断言全部通过", remaining_work="无",
+        end_revision="r2", end_dirty_state=False, changed_files=[],
+        requested_scope=f"project:{project_id}", idempotency_key=uuid4(),
+    )
+    assert finished["status"] == "accepted"
+
+    recovery = service.get_project_context(credential=token, project_id=project_id)
+    assert recovery["active_task"] is None  # finalized: nothing active remains
+
+
+def test_project_deletion_is_gated_then_executable(harness):
+    from personal_brain_domain.common.errors import BrainError
+    from personal_brain_server.admin import set_review_access
+
+    service, token, provisioned = _service(harness)
+    project_id = service.create_project(
+        credential=token, name="待删项目", purpose="governed deletion of a project",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+
+    # The default profile holds review.write only on the review scope: deleting
+    # project data needs the explicit governance switch on the projects scope.
+    with pytest.raises(BrainError) as denied:
+        service.create_deletion_plan(
+            credential=token, targets=[["project", project_id]], dependents={},
+            requested_scope="projects", idempotency_key=uuid4(),
+        )
+    assert denied.value.code == "SCOPE_DENIED"
+
+    set_review_access(
+        harness.factory, harness.tables, client_id=provisioned["client_id"],
+        scope="projects", access="write",
+        confirmed_client_id=provisioned["client_id"], confirmed_scope="projects",
+    )
+
+    plan = service.create_deletion_plan(
+        credential=token, targets=[["project", project_id]], dependents={},
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    assert plan["confirmation_required"] is True and plan["confirmation_state"] == "pending"
+    item = plan["review_item_id"]
+
+    outcome = service.resolve_review_item(
+        credential=token, item_id=item, expected_version=1, decision="approved",
+        idempotency_key=uuid4(),
+    )
+    assert outcome["decision"] == "approved"
+    rows = _project_rows(harness, project_id)
+    assert rows[0]["lifecycle_state"] == "deleted"
+    settled = service.get_deletion_plan(credential=token, plan_id=plan["plan_id"])
+    assert settled["execution_state"] == "completed"
+
+
+def _project_rows(harness, project_id):
+    import sqlalchemy as sa
+
+    with harness.factory() as session:
+        return [dict(row) for row in session.execute(sa.select(
+            harness.tables["projects"],
+        ).where(harness.tables["projects"].c.id == project_id)).mappings().all()]

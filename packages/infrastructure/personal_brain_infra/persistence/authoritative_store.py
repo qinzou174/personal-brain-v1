@@ -603,10 +603,15 @@ class AuthoritativeStore:
             table = self.tables[table_name]
             if "lifecycle_state" not in table.c:
                 continue
+            # Not every canonical table carries deleted_at (e.g. projects);
+            # tombstone with the columns the table actually declares.
+            tombstone = {"lifecycle_state": "deleted", "updated_at": now}
+            if "deleted_at" in table.c:
+                tombstone["deleted_at"] = now
             session.execute(table.update().where(
                 table.c.id == self._db_id(table, "id", target_id),
                 table.c.owner_id == self._db_id(table, "owner_id", self.owner_id),
-            ).values(lifecycle_state="deleted", deleted_at=now, updated_at=now))
+            ).values(**tombstone))
             # The immutable raw source of a deleted canonical target is also
             # retired so late retries cannot restore deleted body references.
             if raw_inputs is not None and "source_id" in table.c and ttype not in {"raw_input"}:
@@ -1395,6 +1400,20 @@ class AuthoritativeStore:
             if uow.session.in_transaction():
                 uow.commit()
         return outcome
+
+    def list_projects(self) -> dict[str, Any]:
+        """Enumerate the owner's projects (discovery for the projects channel)."""
+        projects = self.tables["projects"]
+        with self._session_factory() as session:
+            self._assert_authority(session)
+            rows = session.execute(sa.select(projects).where(
+                projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+            ).order_by(projects.c.created_at, projects.c.id)).mappings().all()
+        return {"projects": [{
+            "project_id": self._external_id(row["id"]), "name": row["name"],
+            "purpose": row["purpose"], "lifecycle_state": row["lifecycle_state"],
+            "version": row["version"],
+        } for row in rows]}
 
     def get_project_recovery(self, project_id: UUID) -> dict[str, Any]:
         projects, tasks, checkpoints = (
