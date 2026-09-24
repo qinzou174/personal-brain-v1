@@ -79,11 +79,16 @@ class AuthoritativeStore:
         side_effect: Callable[[Session, UUID, UUID, datetime], None] | None = None,
         existing_target_id: UUID | None = None,
         dedupe_digest: str | None = None,
+        distinguishing: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if target_table is not None and target_table not in self.tables:
             raise RuntimeError(f"authoritative schema missing table: {target_table}")
+        # The digest must cover everything that changes the outcome: text alone
+        # let a replayed key silently keep stale parameters (a changed priority,
+        # revision or policy class returned the old record without any conflict).
         payload_digest = _digest({
             "operation": operation, "source_text": source_text, "scope": requested_scope,
+            **(dict(sorted((distinguishing or {}).items()))),
         })
         now = _utcnow()
         intake_id, source_id, target_id = uuid4(), uuid4(), existing_target_id or uuid4()
@@ -258,6 +263,7 @@ class AuthoritativeStore:
             operation="add_todo", idempotency_key=idempotency_key, source_text=content,
             requested_scope=requested_scope, tool="todo.write", target_category="todo",
             target_table="todos", result_key="todo_id", job_type="index_todo", pre_commit=pre_commit,
+            distinguishing={"priority": priority},
             target_values=lambda _target, source, now: {
                 "content": content, "state": "pending", "due_at": None, "due_timezone": None,
                 "due_window_start": None, "due_window_end": None, "due_precision": None,
@@ -300,6 +306,7 @@ class AuthoritativeStore:
             source_text=claim_text, requested_scope=requested_scope, tool="self.write",
             target_category="self_claim", target_table="self_claims", result_key="claim_id",
             job_type="index_self_claim",
+            distinguishing={"category": category, "policy_class": policy_class},
             target_values=lambda _target, source, now: {
                 "category": category, "claim": claim_text, "policy_class": policy_class,
                 "lifecycle_state": lifecycle, "establishment": "explicit",
@@ -320,6 +327,7 @@ class AuthoritativeStore:
             source_text=json.dumps(proposal, sort_keys=True, ensure_ascii=False),
             requested_scope=requested_scope, tool="review.write", target_category="review_item",
             target_table="review_inbox_items", result_key="review_item_id", job_type="notify_review",
+            distinguishing={"item_type": item_type, "subject_refs": sorted(subject_refs)},
             target_values=lambda _target, _source, _now: {
                 "item_type": item_type, "subject_refs": subject_refs, "proposal": proposal,
                 "risk": "ordinary", "evidence": [], "state": "open", "resolver_id": None,
@@ -1158,6 +1166,9 @@ class AuthoritativeStore:
             requested_scope=f"project:{project_id}", tool="project.write",
             target_category="project_task", target_table="project_tasks", result_key="task_id",
             job_type="refresh_project_context",
+            distinguishing={"revision": revision, "dirty_state": dirty_state,
+                            "constraints": sorted(constraints), "plan": plan,
+                            "affected_modules": sorted(affected_modules or [])},
             target_values=lambda _target, _source, now: {
                 "project_id": self._db_id(self.tables["project_tasks"], "project_id", project_id),
                 "goal": goal, "state": "active", "start_revision": revision, "end_revision": None,
@@ -1204,6 +1215,9 @@ class AuthoritativeStore:
             source_text=completed_work, requested_scope="project", tool="project.write",
             target_category="checkpoint", target_table="checkpoints", result_key="checkpoint_id",
             job_type="refresh_project_context",
+            distinguishing={"task_id": str(task_id), "revision": revision,
+                            "next_step": next_step, "problems": problems,
+                            "changed_files": sorted(changed_files or [])},
             target_values=lambda _target, _source, now: {
                 "task_id": self._db_id(self.tables["checkpoints"], "task_id", task_id),
                 "revision": revision, "dirty_files": dirty_files or [], "changed_files": changed_files or [],

@@ -43,9 +43,15 @@ def quota_exceeded(
     session: Any, jobs: sa.Table, *, owner_id: Any, now_utc: datetime,
     timezone_name: str, quota: int,
 ) -> bool:
-    """True when this lease would exceed the owner's daily LLM job budget."""
+    """True when this lease would exceed the owner's daily LLM job budget.
+
+    ``>= quota`` (not ``>``): the quota is the number of allowed leases, so the
+    quota-th lease is the last one admitted and quota+1 is refused — the old
+    comparison silently admitted one job beyond the configured budget.
+    """
     if quota < 1:
         raise ValueError("llm quota must be positive")
     return llm_jobs_started(
-        session, jobs, owner_id=owner_id, now_utc=now_utc, timezone_name=timezone_name,
-    ) > quota
+        session, jobs, owner_id=owner_id, now_utc=now_utc,
+        timezone_name=timezone_name,
+    ) >= quota

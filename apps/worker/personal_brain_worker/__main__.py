@@ -23,6 +23,9 @@ from personal_brain_infra.models.volcengine import AnthropicCompatibleProvider, 
 
 
 def main() -> int:
+    from personal_brain_server.bootstrap.logging import configure_logging
+
+    configure_logging()
     stop = threading.Event()
     try:
         settings = Settings()

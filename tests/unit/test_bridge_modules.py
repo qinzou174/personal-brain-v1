@@ -47,6 +47,7 @@ def test_sync_payload_requires_approved_root_proof():
     payload = build_sync_payload(approved_root="/home/kms/workspace", root_proof="proof",
                                  revision="abc", dirty_state=False, changed_paths=("a",), file_hashes={"a": "h"})
     assert payload.root_proof == "proof"
+    assert payload.approved_root_identity == "/home/kms/workspace"
 
 
 def test_capture_workspace_combines_real_git_and_bootstrap(tmp_path):

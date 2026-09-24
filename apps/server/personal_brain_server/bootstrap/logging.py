@@ -58,3 +58,21 @@ def rotation_settings(**overrides: Any) -> dict[str, Any]:
             raise ValueError("log backup_count out of bounds")
         settings["backup_count"] = value
     return settings
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Install the redaction filter and correlation formatter project-wide.
+
+    These pieces existed without a caller for a full release: the redaction
+    contract (FR-070) only holds when the filter is actually attached, so wiring
+    it at every entrypoint is part of the contract, not an optional extra.
+    """
+    formatter = CorrelationFormatter(
+        "%(asctime)s %(levelname)s %(name)s correlation=%(correlation_id)s %(message)s",
+    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    handler.addFilter(RedactingFilter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level)

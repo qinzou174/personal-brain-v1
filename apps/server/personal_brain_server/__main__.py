@@ -149,6 +149,9 @@ def _admin_command(settings: Settings, args: argparse.Namespace) -> dict[str, ob
 
 
 def main(argv: list[str] | None = None) -> int:
+    from personal_brain_server.bootstrap.logging import configure_logging
+
+    configure_logging()
     args = _arguments(argv)
     try:
         settings = Settings()

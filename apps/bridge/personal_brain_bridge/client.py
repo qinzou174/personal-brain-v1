@@ -17,7 +17,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class SyncPayload:
-    approved_root: str
+    # Field names mirror the server-side ``sync_workspace`` schema exactly, so a
+    # bridge payload can be sent as-is (they used to drift: `approved_root` vs
+    # `approved_root_identity`).
+    approved_root_identity: str
     root_proof: str
     revision: str | None
     branch_ref: str | None
@@ -25,19 +28,24 @@ class SyncPayload:
     changed_paths: tuple[str, ...]
     file_hashes: dict[str, str]
     modules: tuple[dict, ...] = ()
+    bridge_client_id: str | None = None
+    idempotency_key: str | None = None
 
 
 def build_sync_payload(*, approved_root: str, root_proof: str, revision: str | None,
                        dirty_state: bool | None, changed_paths: tuple[str, ...],
                        file_hashes: dict[str, str], branch_ref: str | None = None,
-                       modules: tuple[dict, ...] = ()) -> SyncPayload:
+                       modules: tuple[dict, ...] = (), bridge_client_id: str | None = None,
+                       idempotency_key: str | None = None) -> SyncPayload:
     if not approved_root or not root_proof:
         raise ValueError("sync requires approved root and proof")
     if len(changed_paths) > 1000:
         raise ValueError("changed paths exceed bound")
-    return SyncPayload(approved_root=approved_root, root_proof=root_proof, revision=revision,
-                       branch_ref=branch_ref, dirty_state=dirty_state, changed_paths=changed_paths,
-                       file_hashes=dict(file_hashes), modules=tuple(modules))
+    return SyncPayload(approved_root_identity=approved_root, root_proof=root_proof,
+                       revision=revision, branch_ref=branch_ref, dirty_state=dirty_state,
+                       changed_paths=changed_paths, file_hashes=dict(file_hashes),
+                       modules=tuple(modules), bridge_client_id=bridge_client_id,
+                       idempotency_key=idempotency_key)
 
 
 def capture_workspace(*, approved_root: str, since_revision: str | None = None,
