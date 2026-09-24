@@ -301,7 +301,9 @@ def main(argv: list[str] | None = None) -> int:
             code = error.code if isinstance(error, BrainError) else "OPERATOR_COMMAND_FAILED"
             print(json.dumps({"status": "failed", "error": code}), file=sys.stderr)
             return 2
-        print(f"personal-brain-server: startup failed ({type(error).__name__})", file=sys.stderr)
+        detail = str(error)
+        print(f"personal-brain-server: startup failed ({type(error).__name__}"
+              + (f": {detail[:400]}" if detail else "") + ")", file=sys.stderr)
         return 2
 
 
