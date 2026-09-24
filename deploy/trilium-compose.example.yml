@@ -1,0 +1,40 @@
+# Trilium 可选服务参考（Compose profile: extras）
+
+> 用于需要以容器方式运行 Trilium 人工笔记界面的部署。Personal Brain 核心
+> **不依赖**此服务（FR-100：Trilium 是可移除客户端）。
+> 若你的 compose.yaml 已包含 `trilium` 服务段（profile extras），无需重复本文件；
+> 本文件作为独立参考模板保留。
+
+## 启用（与主 stack 同 profile）
+
+```bash
+# 默认仅核心服务
+docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml ps   # 无 trilium
+
+# 启动 Trilium（可选）
+docker compose -f deploy/compose.yaml --profile extras up -d trilium
+```
+
+## 关闭
+
+```bash
+docker compose -f deploy/compose.yaml --profile extras stop trilium
+# 或彻底移除（不删数据卷）
+docker compose -f deploy/compose.yaml --profile extras rm trilium
+```
+
+## 容量与边界（US12 / FR-101）
+
+- Trilium 数据仅存放于其专属数据卷 `trilium-data`，不进入 Brain 的 canonical
+  存储。
+- Brain 侧单向导入由 `Brain Worker` 的 `human_knowledge_import` 作业执行
+  （`apps/worker/personal_brain_worker/human_knowledge_import.py`），遵守
+  普通 intake/lineage 策略：保留来源身份、checkpoint、冲突、secret 过滤与备份。
+- 关闭 Trilium 不影响：记忆、检索、权限、项目连续性、备份恢复。
+- 生产数据写入前仍需满足 T186 外部门禁（真实 endpoint + 认证证据）。
+
+## 为何默认关闭
+
+`profiles: ["extras"]` 使默认 `docker compose up -d` 行为完全不变
+（向后兼容），并显式表达"可选附加件"语义，避免误启动与可移除约束被破坏。

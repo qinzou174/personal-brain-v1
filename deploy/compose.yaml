@@ -120,9 +120,23 @@ services:
     networks: [internal]
     restart: unless-stopped
 
+  # Optional human-note interface (US12, removable client). NOT part of the
+  # default stack: enabled only via `docker compose --profile extras ...`.
+  # The Brain core never depends on this service (FR-100).
+  trilium:
+    image: zadam/trilium:latest
+    profiles: ["extras"]
+    environment:
+      TRILIUM_DATA_DIR: /home/node/trilium-data
+    volumes:
+      - trilium-data:/home/node/trilium-data
+    networks: [internal]
+    restart: unless-stopped
+
 volumes:
   brain-db: {}
   brain-data: {}
+  trilium-data: {}
 
 networks:
   internal: {}
