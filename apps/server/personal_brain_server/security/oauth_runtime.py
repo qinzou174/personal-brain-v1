@@ -63,6 +63,18 @@ class OAuthBearerAuthority:
             context, tool=tool, scope=scope, sensitivity=sensitivity, now=now, risk=risk,
         )
 
+    def grant_project_scope(self, context: AuthorityContext, *, project_id: Any,
+                            now: datetime | None = None) -> dict[str, Any]:
+        """Delegate the creator self-grant to the opaque authority.
+
+        The wrapper must expose every mutating authority operation the tool
+        service uses, otherwise a capability silently disappears for MCP clients
+        while staying present for direct callers (observed 2026-09-25: the
+        projects-channel self-grant never fired through MCP because ``getattr``
+        on this wrapper returned None).
+        """
+        return self._opaque.grant_project_scope(context, project_id=project_id, now=now)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
