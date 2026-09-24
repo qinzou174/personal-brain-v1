@@ -69,12 +69,25 @@ class PostgresSearchRepository:
             self._table.c.valid_to.is_(None),
         )
         tsquery = sa.func.websearch_to_tsquery("simple", fts_query_text(query))
-        keyword_stmt = sa.select(
-            self._table,
-            sa.func.ts_rank_cd(self._table.c.search_document, tsquery).label("keyword_score"),
-        ).where(*base, self._table.c.search_document.op("@@")(tsquery)).order_by(
-            sa.desc("keyword_score"), self._table.c.id,
-        ).limit(50)
+        # ER-03: RRF is the only cross-list ranking authority, so document length
+        # must never scale the *fused* score. RRF scores live in a ~1/60 band
+        # (0.009..0.033), while a multiplicative length penalty spans 10x: it ends
+        # up ranking by length instead of relevance and hides long records
+        # entirely. Observed regression (chain-audit 2026-09-24): a long archive
+        # that was the only lexical match (keyword rank 1) *and* semantic rank 1
+        # for the query "壁纸" still dropped out of the top 30, because 400/2031
+        # scaled its fused score from the best to below every short note.
+        # ts_rank_cd's own length bias (jieba OR-matches accumulate in long
+        # documents) is corrected inside the keyword list instead, BM25-style:
+        # keyword score per log-length, i.e. match density.
+        document_length = sa.func.greatest(sa.func.length(self._table.c.searchable_text), 1)
+        keyword_density = (
+            sa.func.ts_rank_cd(self._table.c.search_document, tsquery)
+            / (1.0 + sa.func.ln(document_length))
+        ).label("keyword_density")
+        keyword_stmt = sa.select(self._table, keyword_density).where(
+            *base, self._table.c.search_document.op("@@")(tsquery),
+        ).order_by(sa.desc("keyword_density"), self._table.c.id).limit(50)
         semantic_rows: list[Mapping[str, Any]] = []
         with self._factory() as session:
             keyword_rows = session.execute(keyword_stmt).mappings().all()
@@ -90,24 +103,7 @@ class PostgresSearchRepository:
         scores = rrf_fuse(keyword_rank=keyword_ids, semantic_rank=semantic_ids)
         by_id = {row["id"]: row for row in [*keyword_rows, *semantic_rows]}
 
-        def _length_penalty(row: Mapping[str, Any]) -> float:
-            """Weight short, precise records above long multi-topic documents.
-
-            jieba search-mode tokenization splits short phrases (拿铁 -> 拿/铁),
-            so keyword rank favors longer documents that OR-match more segments;
-            whole-document embeddings likewise average long archives across many
-            topics. Without a length term, personal archives drown out exact
-            diary/expense records (O2). Penalty is monotone and capped (>= 0.1).
-            """
-            length = len(row.get("searchable_text") or "")
-            if length <= 400:
-                return 1.0
-            return max(0.1, 400.0 / length)
-
-        ranked = sorted(
-            scores,
-            key=lambda item: (-(scores[item] * _length_penalty(by_id[item])), str(item)),
-        )[:limit]
+        ranked = sorted(scores, key=lambda item: (-scores[item], str(item)))[:limit]
         results = []
         for entry_id in ranked:
             row = by_id[entry_id]
