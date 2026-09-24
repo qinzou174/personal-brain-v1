@@ -20,8 +20,11 @@
 **凭据获取**：token 不在此文档中明文保存，只存在服务端文件：
 
 ```bash
-ssh codex-kms "cat /home/kms/personal-brain-v1-data/secrets/zafiro-credential"
+ssh codex-kms "cat /home/kms/deploy/personal-brain/prod-data/secrets/zafiro-credential"
 ```
+
+> 注：该文件在凭据轮换（rotate-client）时由管理员生成到 `prod-data/secrets/`；
+> 若文件不存在，用 rotate-client 重新签发一次即可（旧 token 立即失效）。
 
 token 是 64 字符 bearer 串，只应在客户端本地安全存储（密钥库/`chmod 600` 文件），不要写入聊天、日志或版本库。
 

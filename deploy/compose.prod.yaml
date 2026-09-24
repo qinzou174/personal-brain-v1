@@ -5,8 +5,8 @@
 # named volumes, and every secret is mounted from a file (never embedded).
 #
 # Deploy:
-#   cd /home/kms/personal-brain-v1-prod && git pull --ff-only && \
-#     S=/home/kms/personal-brain-v1-prod-data/secrets && \
+#   cd /home/kms/deploy/personal-brain/prod && git pull --ff-only && \
+#     S=/home/kms/deploy/personal-brain/prod-data/secrets && \
 #     BRAIN_DB_PASSWORD_FILE=$S/db_password BRAIN_DB_DSN_FILE=$S/db_dsn \
 #     BRAIN_TOKEN_PEPPER_FILE=$S/token_pepper BRAIN_MODEL_API_KEY_FILE=$S/model_api_key \
 #     docker compose -f deploy/compose.prod.yaml up -d --build api worker migrate
@@ -22,7 +22,7 @@ services:
     environment:
       BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
     volumes:
-      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+      - /home/kms/deploy/personal-brain/prod-data/model-proxy:/run/model-proxy
     healthcheck:
       test: ["CMD-SHELL", "test -S /run/model-proxy/ark.sock"]
       interval: 10s
@@ -113,7 +113,7 @@ services:
       BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
     volumes:
       - brain-data:/srv/brain/data
-      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+      - /home/kms/deploy/personal-brain/prod-data/model-proxy:/run/model-proxy
     secrets: [db_dsn, token_pepper, model_api_key]
     networks: [internal]
     restart: unless-stopped
@@ -150,7 +150,7 @@ services:
       BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
     volumes:
       - brain-data:/srv/brain/data
-      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+      - /home/kms/deploy/personal-brain/prod-data/model-proxy:/run/model-proxy
     networks: [internal]
     restart: unless-stopped
     logging:

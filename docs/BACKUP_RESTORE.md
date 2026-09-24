@@ -7,7 +7,7 @@ scripts below remain as the specification-level reference.
 
 ```bash
 # On the deployment host (reads secrets through the containers that own them):
-deploy/scripts/prod-backup.sh          # -> /home/kms/personal-brain-v1-backups/personal-brain-prod-<stamp>.tar.age
+deploy/scripts/prod-backup.sh          # -> /home/kms/deploy/personal-brain/backups/personal-brain-prod-<stamp>.tar.age
 # On the operator machine (off-host copy + sha256 verification):
 uv run python deploy/windows-local/pull_backup.py   # -> E:\Personal-Brain-V1-local\backups\...
 ```

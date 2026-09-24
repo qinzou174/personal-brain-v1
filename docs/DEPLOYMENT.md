@@ -4,8 +4,9 @@ Phase 0 layout decision: `docs/deployment-decision.md`.
 
 - Target: `kms@192.168.10.7`, LAN-only first stage. Bind `192.168.10.7:18081`
   only; DB/worker stay on an internal Compose network with no published port.
-- Project dirs: `/home/kms/personal-brain-v1` (code), `-data` (runtime),
-  `-backups` (staging). Never under `/home/kms/A/projects`.
+- Project dirs (2026-09-25 regrouped under `/home/kms/deploy/personal-brain/`):
+  `prod/` (code), `prod-data/` (secrets & runtime mounts),
+  `backups/` (encrypted bundles), `backup-input/` / `backup-keys/` (backup staging).
 - Compose: `deploy/compose.yaml` (deployed; API published only on the approved
   LAN address; DB and worker remain internal).
 - Dockerfile: `deploy/Dockerfile` (non-root, reproducible).

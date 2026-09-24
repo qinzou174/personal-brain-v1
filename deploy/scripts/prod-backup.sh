@@ -21,9 +21,9 @@
 set -euo pipefail
 umask 077
 
-PROJECT_DIR="${PROJECT_DIR:-/home/kms/personal-brain-v1-prod}"
-DATA_DIR="${DATA_DIR:-/home/kms/personal-brain-v1-prod-data}"
-DEST="${BACKUP_DEST:-/home/kms/personal-brain-v1-backups}"
+PROJECT_DIR="${PROJECT_DIR:-/home/kms/deploy/personal-brain/prod}"
+DATA_DIR="${DATA_DIR:-/home/kms/deploy/personal-brain/prod-data}"
+DEST="${BACKUP_DEST:-/home/kms/deploy/personal-brain/backups}"
 KEEP="${BACKUP_KEEP:-7}"
 DB_CONTAINER="${DB_CONTAINER:-personal-brain-v1-prod-db-1}"
 API_CONTAINER="${API_CONTAINER:-personal-brain-v1-prod-api-1}"

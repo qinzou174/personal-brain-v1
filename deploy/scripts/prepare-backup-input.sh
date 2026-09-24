@@ -26,13 +26,13 @@ EOF
 cat > "$ROOT/freeze-hook.sh" <<'EOF'
 #!/usr/bin/env bash
 set -e
-mkdir -p /home/kms/personal-brain-v1-backup-input/.fence
-echo frozen > /home/kms/personal-brain-v1-backup-input/.fence/state
+mkdir -p /home/kms/deploy/personal-brain/backup-input/.fence
+echo frozen > /home/kms/deploy/personal-brain/backup-input/.fence/state
 EOF
 cat > "$ROOT/thaw-hook.sh" <<'EOF'
 #!/usr/bin/env bash
 set -e
-rm -rf /home/kms/personal-brain-v1-backup-input/.fence
+rm -rf /home/kms/deploy/personal-brain/backup-input/.fence
 EOF
 chmod 700 "$ROOT/freeze-hook.sh" "$ROOT/thaw-hook.sh"
 
