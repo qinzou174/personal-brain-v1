@@ -350,9 +350,33 @@ class AuthoritativeStore:
             self.tables["audit_events"], self.tables["idempotency_records"], self.tables["intake_requests"],
         )
         now, plan_id, item_id, job_id, audit_id, correlation_id = _utcnow(), uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+        # A project owns its facts. Decisions/constraints/change events travel
+        # with it even when the caller did not enumerate them — otherwise the
+        # approved plan would leave a deleted project's facts active and indexed.
+        resolved = {target_id: list(dependents.get(target_id, [])) for _type, target_id in targets}
+        with self._session_factory() as session:
+            for target_type, target_id in targets:
+                if target_type != "project":
+                    continue
+                for fact_type, table_name in (("decision", "decisions"),
+                                              ("constraint", "constraints"),
+                                              ("change_event", "change_events")):
+                    table = self.tables.get(table_name)
+                    if table is None:
+                        continue
+                    fact_ids = session.scalars(sa.select(table.c.id).where(
+                        table.c.owner_id == self._db_id(table, "owner_id", self.owner_id),
+                        table.c.project_id == self._db_id(table, "project_id", target_id),
+                        table.c.lifecycle_state == "active",
+                    ))
+                    declared = resolved[target_id]
+                    for fact_id in fact_ids:
+                        entry = (fact_type, UUID(self._external_id(fact_id)))
+                        if entry not in declared:
+                            declared.append(entry)
         impact_graph = {str(target_id): [
             {"target_type": dep_type, "target_id": str(dep_id)}
-            for dep_type, dep_id in dependents.get(target_id, [])
+            for dep_type, dep_id in resolved.get(target_id, [])
         ] for _, target_id in targets}
         payload = {"targets": [[t, str(i)] for t, i in targets], "impact": impact_graph}
         with UnitOfWork(self._session_factory) as uow:

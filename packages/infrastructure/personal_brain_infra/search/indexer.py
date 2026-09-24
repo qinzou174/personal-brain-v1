@@ -24,18 +24,18 @@ class SearchIndexer:
             owner_id = UUID(str(job["owner_id"]))
         except (ValueError, AttributeError) as error:
             raise BrainError("VALIDATION_FAILED") from error
-        if target_type == "raw_input":
-            entry = self._raw_input(owner_id, target_id)
-        elif target_type == "todo":
-            entry = self._simple(owner_id, target_id, "todos", "content", "todo")
-        elif target_type == "self_claim":
-            entry = self._simple(owner_id, target_id, "self_claims", "claim", "self")
-        elif target_type in {"decision", "constraint", "change_event"}:
-            entry = self._fact(owner_id, target_type, target_id)
-        elif target_type in {"project", "project_task", "checkpoint", "workspace_observation"}:
-            entry = self._project(owner_id, target_type, target_id)
-        else:
-            raise BrainError("VALIDATION_FAILED")
+        try:
+            entry = self._entry_for(owner_id, target_type, target_id)
+        except BrainError as error:
+            if error.code != "NOT_FOUND":
+                raise
+            # A refresh can legitimately race a governed deletion: by execution
+            # time the source is tombstoned (or superseded). The projection of an
+            # absent source is *no card*, so settle the job as a declared skip —
+            # dead-lettering it would turn every deletion into a health alert.
+            # Deletion already removed surviving cards via reconcile_deletion.
+            return {"target_ref": f"{target_type}:{target_id}", "indexed": False,
+                    "skipped": "source_gone"}
         repository = PostgresSearchRepository(
             self._factory, self._tables["search_index_entries"], owner_id=owner_id,
         )
@@ -61,6 +61,20 @@ class SearchIndexer:
         if warnings:
             result["warnings"] = warnings
         return result
+
+    def _entry_for(self, owner_id: UUID, target_type: str, target_id: UUID) -> dict[str, Any]:
+        """Resolve the canonical row into a retrieval card (NOT_FOUND when gone)."""
+        if target_type == "raw_input":
+            return self._raw_input(owner_id, target_id)
+        if target_type == "todo":
+            return self._simple(owner_id, target_id, "todos", "content", "todo")
+        if target_type == "self_claim":
+            return self._simple(owner_id, target_id, "self_claims", "claim", "self")
+        if target_type in {"decision", "constraint", "change_event"}:
+            return self._fact(owner_id, target_type, target_id)
+        if target_type in {"project", "project_task", "checkpoint", "workspace_observation"}:
+            return self._project(owner_id, target_type, target_id)
+        raise BrainError("VALIDATION_FAILED")
 
     def _raw_input(self, owner_id: UUID, target_id: UUID) -> dict[str, Any]:
         raw, intake = self._tables["raw_inputs"], self._tables["intake_requests"]
@@ -121,9 +135,12 @@ class SearchIndexer:
         }[target_type]
         table = self._tables[table_name]
         with self._factory() as session:
-            row = session.execute(sa.select(table).where(
-                table.c.id == target_id, table.c.owner_id == owner_id,
-            )).mappings().one_or_none()
+            conditions = [table.c.id == target_id, table.c.owner_id == owner_id]
+            if "lifecycle_state" in table.c:
+                # A tombstoned project (or task/checkpoint under it) is gone for
+                # retrieval: a late bootstrap job must not recreate its card.
+                conditions.append(table.c.lifecycle_state == "active")
+            row = session.execute(sa.select(table).where(*conditions)).mappings().one_or_none()
             if row is None:
                 raise BrainError("NOT_FOUND")
             if target_type == "project":

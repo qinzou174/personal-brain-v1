@@ -232,8 +232,8 @@ def test_create_project_rejects_blank_name_and_purpose(harness):
 
 def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
     """Deleting a project must take its facts with it and close every read path:
-    facts declared as dependents tombstone, the recovery view turns NOT_FOUND and
-    discovery stops listing the project."""
+    the plan discovers the facts itself (the caller declares none), they tombstone
+    with the project, the recovery view turns NOT_FOUND and discovery drops it."""
     from personal_brain_domain.common.errors import BrainError
     from personal_brain_server.admin import set_review_access
 
@@ -257,11 +257,13 @@ def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
         confirmed_client_id=provisioned["client_id"], confirmed_scope="projects",
     )
     plan = service.create_deletion_plan(
-        credential=token, targets=[["project", project_id]],
-        dependents={project_id: [["decision", decision["decision_id"]],
-                                 ["constraint", constraint["constraint_id"]]]},
+        credential=token, targets=[["project", project_id]], dependents={},
         requested_scope="projects", idempotency_key=uuid4(),
     )
+    preview = service.get_deletion_plan(credential=token, plan_id=plan["plan_id"])
+    assert {row["target_id"] for row in preview["impact_graph"][project_id]} == {
+        decision["decision_id"], constraint["constraint_id"],
+    }, "the approved plan must show the facts it will delete"
     service.resolve_review_item(
         credential=token, item_id=plan["review_item_id"], expected_version=1,
         decision="approved", idempotency_key=uuid4(),
@@ -278,6 +280,63 @@ def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
     assert gone.value.code == "NOT_FOUND"
     listed = {row["project_id"] for row in service.list_projects(credential=token)["projects"]}
     assert project_id not in listed
+
+
+def test_refresh_job_racing_a_deletion_settles_as_a_declared_skip(harness):
+    """A refresh job that still sits in the queue when its project is deleted must
+    settle as "no card to write" — dead-lettering it would flag every deletion as
+    a health incident after the facts cascade."""
+    from pathlib import Path
+
+    from activation_support import job_state, run_pending_jobs
+    from personal_brain_infra.storage.local import LocalStorage
+    from personal_brain_server.admin import set_review_access
+    from personal_brain_worker.job_handlers import build_job_handlers
+
+    service, token, provisioned = _service(harness)
+    project_id = service.create_project(
+        credential=token, name="竞态跳过验证", purpose="refresh job races deletion",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    decision = service.record_decision(
+        credential=token, project_id=project_id, statement="删掉后不该再建卡",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    ref = f"decision:{decision['decision_id']}"
+    job_ids = [row["id"] for row in table_rows(harness, "jobs", job_type="refresh_project_context",
+                                               payload_ref=ref)]
+    # The project's own bootstrap job is queued too and must not rebuild a card
+    # for the tombstoned project.
+    job_ids += [row["id"] for row in table_rows(harness, "jobs", job_type="bootstrap_project",
+                                                payload_ref=f"project:{project_id}")]
+    assert job_ids  # the refresh job is still queued when the deletion happens
+
+    set_review_access(
+        harness.factory, harness.tables, client_id=provisioned["client_id"],
+        scope="projects", access="write",
+        confirmed_client_id=provisioned["client_id"], confirmed_scope="projects",
+    )
+    plan = service.create_deletion_plan(
+        credential=token, targets=[["project", project_id]], dependents={},
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    service.resolve_review_item(
+        credential=token, item_id=plan["review_item_id"], expected_version=1,
+        decision="approved", idempotency_key=uuid4(),
+    )
+
+    handlers = build_job_handlers(harness.factory, harness.tables, LocalStorage(
+        Path(harness.data_root) / "skip-assets"))
+    run_pending_jobs(harness, handlers)
+
+    for job_id in job_ids:
+        settled = job_state(harness, job_id)
+        assert settled["state"] == "succeeded", settled["error_summary"]
+        assert (settled["result_refs"] or {}).get("skipped") == "source_gone"
+    cards = [row for row in table_rows(harness, "search_index_entries",
+                                       owner_id=UUID(provisioned["owner_id"]))
+             if str(row["target_id"]) in {decision["decision_id"], project_id}]
+    assert cards == []  # an absent source projects to no card
 
 
 def _project_rows(harness, project_id):
