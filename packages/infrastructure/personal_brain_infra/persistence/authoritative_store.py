@@ -590,10 +590,16 @@ class AuthoritativeStore:
                 performed_at=now, opaque_deletion_version=int(opaque_version),
             ))
         # Tombstone canonical originals and their raw sources (value-free).
+        # Project facts (decision/constraint/change_event) are declared as
+        # dependents of their project, so they must tombstone with it — leaving
+        # them active would keep a deleted project's facts readable (and
+        # re-indexable by a later refresh job).
         table_for = {
             "raw_input": "raw_inputs", "expense": "expenses", "todo": "todos",
             "self_claim": "self_claims", "document": "documents", "asset": "assets",
             "project": "projects", "project_task": "project_tasks",
+            "decision": "decisions", "constraint": "constraints",
+            "change_event": "change_events",
         }
         raw_inputs = self.tables.get("raw_inputs")
         for ttype, target_id, _action in deletion_actions:
@@ -1402,12 +1408,17 @@ class AuthoritativeStore:
         return outcome
 
     def list_projects(self) -> dict[str, Any]:
-        """Enumerate the owner's projects (discovery for the projects channel)."""
+        """Enumerate the owner's live projects (discovery for the projects channel).
+
+        Tombstoned projects stay in canonical storage but are not listed: a
+        client that deleted a project must not keep seeing it in discovery.
+        """
         projects = self.tables["projects"]
         with self._session_factory() as session:
             self._assert_authority(session)
             rows = session.execute(sa.select(projects).where(
                 projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
             ).order_by(projects.c.created_at, projects.c.id)).mappings().all()
         return {"projects": [{
             "project_id": self._external_id(row["id"]), "name": row["name"],
@@ -1425,8 +1436,11 @@ class AuthoritativeStore:
             self._assert_authority(session)
             project = session.execute(sa.select(projects).where(
                 projects.c.id == project_key, projects.c.owner_id == owner,
+                projects.c.lifecycle_state == "active",
             )).mappings().one_or_none()
             if project is None:
+                # A tombstoned project is gone for readers too: its recovery view
+                # must not be reconstructable after governed deletion.
                 raise BrainError("NOT_FOUND")
             active = session.execute(sa.select(tasks).where(
                 tasks.c.owner_id == self._db_id(tasks, "owner_id", self.owner_id),

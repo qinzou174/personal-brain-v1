@@ -230,6 +230,56 @@ def test_create_project_rejects_blank_name_and_purpose(harness):
     assert blank_purpose.value.code == "VALIDATION_FAILED"
 
 
+def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
+    """Deleting a project must take its facts with it and close every read path:
+    facts declared as dependents tombstone, the recovery view turns NOT_FOUND and
+    discovery stops listing the project."""
+    from personal_brain_domain.common.errors import BrainError
+    from personal_brain_server.admin import set_review_access
+
+    service, token, provisioned = _service(harness)
+    project_id = service.create_project(
+        credential=token, name="级联删除验证", purpose="deletion must tombstone facts",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    decision = service.record_decision(
+        credential=token, project_id=project_id, statement="删除必须级联事实",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    constraint = service.record_constraint(
+        credential=token, project_id=project_id, statement="墓碑后不可再读",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+
+    set_review_access(
+        harness.factory, harness.tables, client_id=provisioned["client_id"],
+        scope="projects", access="write",
+        confirmed_client_id=provisioned["client_id"], confirmed_scope="projects",
+    )
+    plan = service.create_deletion_plan(
+        credential=token, targets=[["project", project_id]],
+        dependents={project_id: [["decision", decision["decision_id"]],
+                                 ["constraint", constraint["constraint_id"]]]},
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    service.resolve_review_item(
+        credential=token, item_id=plan["review_item_id"], expected_version=1,
+        decision="approved", idempotency_key=uuid4(),
+    )
+
+    assert _project_rows(harness, project_id)[0]["lifecycle_state"] == "deleted"
+    for table, fact_id in (("decisions", decision["decision_id"]),
+                           ("constraints", constraint["constraint_id"])):
+        rows = table_rows(harness, table, id=UUID(fact_id))
+        assert rows and rows[0]["lifecycle_state"] == "deleted", f"{table} kept its fact active"
+
+    with pytest.raises(BrainError) as gone:
+        service.get_project_context(credential=token, project_id=project_id)
+    assert gone.value.code == "NOT_FOUND"
+    listed = {row["project_id"] for row in service.list_projects(credential=token)["projects"]}
+    assert project_id not in listed
+
+
 def _project_rows(harness, project_id):
     import sqlalchemy as sa
 
