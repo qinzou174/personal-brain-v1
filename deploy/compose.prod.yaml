@@ -103,7 +103,7 @@ services:
       BRAIN_DATA_ROOT: /srv/brain/data
       BRAIN_DATABASE_DSN_FILE: /run/secrets/db_dsn
       BRAIN_TOKEN_PEPPER_FILE: /run/secrets/token_pepper
-      BRAIN_ENDPOINT_TOKEN_FILE: /run/secrets/doctor_token
+      BRAIN_ENDPOINT_TOKEN_FILE: /srv/brain/doctor_token
       BRAIN_EXTERNAL_MODELS_ENABLED: "true"
       BRAIN_MODEL_API_KEY_FILE: /run/secrets/model_api_key
       BRAIN_CHAT_MODEL_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
@@ -132,7 +132,7 @@ services:
         condition: service_completed_successfully
       model-proxy:
         condition: service_healthy
-    secrets: [db_dsn, token_pepper, model_api_key, doctor_token]
+    secrets: [db_dsn, token_pepper, model_api_key]
     environment:
       BRAIN_ENVIRONMENT: production
       BRAIN_BIND_HOST: 0.0.0.0
@@ -152,6 +152,7 @@ services:
     volumes:
       - brain-data:/srv/brain/data
       - /home/kms/deploy/personal-brain/prod-data/model-proxy:/run/model-proxy
+      - /home/kms/deploy/personal-brain/prod-data/secrets/doctor_token:/srv/brain/doctor_token:ro
     networks: [internal]
     restart: unless-stopped
     logging:
@@ -190,5 +191,3 @@ secrets:
     file: ${BRAIN_TOKEN_PEPPER_FILE:?set BRAIN_TOKEN_PEPPER_FILE}
   model_api_key:
     file: ${BRAIN_MODEL_API_KEY_FILE:?set BRAIN_MODEL_API_KEY_FILE}
-  doctor_token:
-    file: ${BRAIN_ENDPOINT_TOKEN_FILE:?set BRAIN_ENDPOINT_TOKEN_FILE}
