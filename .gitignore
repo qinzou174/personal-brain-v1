@@ -51,15 +51,15 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Local-only ops tooling (embedded LAN credentials / local secrets access)
-deploy/windows-local/fetch_logs.py
-deploy/windows-local/inspect_server_auth.py
-deploy/windows-local/inspect_auth.py
-deploy/windows-local/server_exec.py
-deploy/windows-local/server_deploy.py
-deploy/windows-local/sync_to_server.py
+# Local-only ops tooling: the helpers themselves are versioned (credential-free,
+# they read deploy/windows-local/_local_creds.txt or BRAIN_SSH_PASSWORD)
+deploy/windows-local/_local_creds.txt
 deploy/windows-local/*.sh
 .git-commit-msg.txt
+
+# Private notes and local execution state
+.execution/
+个人信息.txt
 
 # Tooling backup artifacts
 .bak-*/
