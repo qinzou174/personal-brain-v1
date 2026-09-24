@@ -70,7 +70,50 @@ digest 溯源机检（`deploy/windows-local/dbg_digest_trace.py`）：
 | ③ 升级/降级/冲突留痕可回溯 | 晋升/激活/过期/历史都写 `correction_events`；冲突写 `conflicts` + Inbox 项（测试断言） |
 | ④ digest/回答可溯源 | digest `source_links` 100% 覆盖来源，`summarized_from` 边逐条回指 |
 
-## 4. 生产实例（192.168.10.7:18083）
+## 4. 生产实例（192.168.10.7:18083）本轮部署后的实跑
 
-- 部署：pull `main` → rebuild → `up -d`（见 §5 部署记录）；
-- 运行验证：见本轮部署后的 jobs/derived 统计与 MCP 实写（追加于本节）。
+部署：`git pull --ff-only`（a1614cc → 51f2662）→ `docker compose -f compose.prod.yaml up -d
+--build api worker`（migrate 先行 Exited(0)、model-proxy healthy、api/worker 重建启动）。
+
+无用户交互下，调度器首个 tick 即排产并全部成功（`server_sql.py` 只读查询）：
+
+```
+daily_digest | succeeded | 1 | 2026-09-24 10:16:14Z   （窗口=前一日本地日，当日库内无前日内容 → 诚实 skip）
+promote_candidates | succeeded | 1
+retention_sweep | succeeded | 1
+conflict_scan | succeeded | 1
+retention_maintenance | succeeded | 1
+health_check | succeeded | 1
+dispatch_notification | succeeded | 1
+```
+
+- **主动通知实测**：health_check 检出 2 个历史 dead_letter（parse_asset，旧瑕疵）→ 生成
+  一条 notification 并经 dispatch_notification 送达：
+  `brain_health_failure | inbox | high | delivered | failed_jobs=2 stale_modules=0`
+  （这正是"系统异常要主动告诉主人"的设计行为；作业本身未做任何自动清理，人工决定）。
+- **"克制"对照**：本机实例当日无失败作业 → notifications 表为空（不发无谓通知）。
+
+## 5. 真实模型抽取实测（本机实例，`dbg_activation_extract.py`）
+
+写入一条偏好类笔记（`save_note`，真实 AuthoritativeStore）后，运行中的 worker 自动完成：
+
+```
+jobs:    index_raw_input succeeded / extract_raw_input succeeded
+derived: kind=description state=active payload_ref=<stored json>
+claims:  preference  用户最近越来越喜欢手冲咖啡        B/candidate/candidate  api:knowledge
+         habit       用户早上先来一杯拿铁已经成了习惯    B/candidate/candidate  api:knowledge
+         interest    用户周末喜欢去山里徒步            B/candidate/candidate  api:knowledge
+evidence rows: 3
+```
+
+即"记一条 → LLM 抽取 → B 类候选 + 证据行"的完整链路在活实例上用真实模型跑通；
+候选不会直接成为事实（需 Δ3 的证据门槛）。
+
+> 说明：`deploy/windows-local/dbg_activation*.py`、`server_sql.py` 为本机运维工具
+> （本地未入库，与本仓库既有 dbg_* 脚本同类）。
+
+## 6. 尚未覆盖 / 后续观察
+
+- 生产库首份 digest 将于部署后第一个 03:10（本地）对"当日记录"生成（本轮窗口内无前日数据，属诚实跳过）；
+- 候选升级（B→established）需 ≥14 天证据跨度，属"中间线"指标，需一周真实使用后回看；
+- 冲突 Inbox 的自动触发依赖"同主题相反极性"的记录实际出现（测试已构造验证）。
