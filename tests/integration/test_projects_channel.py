@@ -230,12 +230,17 @@ def test_create_project_rejects_blank_name_and_purpose(harness):
     assert blank_purpose.value.code == "VALIDATION_FAILED"
 
 
-def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
-    """Deleting a project must take its facts with it and close every read path:
-    the plan discovers the facts itself (the caller declares none), they tombstone
-    with the project, the recovery view turns NOT_FOUND and discovery drops it."""
+def test_governed_deletion_cascades_to_children_and_seals_reads(harness):
+    """Deleting a project takes everything with it: the plan discovers facts,
+    tasks and checkpoints itself (the caller declares none), the facts tombstone,
+    every retrieval card under the project is cleared and each read path closes."""
+    from pathlib import Path
+
+    from activation_support import run_pending_jobs
     from personal_brain_domain.common.errors import BrainError
+    from personal_brain_infra.storage.local import LocalStorage
     from personal_brain_server.admin import set_review_access
+    from personal_brain_worker.job_handlers import build_job_handlers
 
     service, token, provisioned = _service(harness)
     project_id = service.create_project(
@@ -250,6 +255,24 @@ def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
         credential=token, project_id=project_id, statement="墓碑后不可再读",
         rationale="验收", affected_modules=[], idempotency_key=uuid4(),
     )
+    task_id = service.start_task(
+        credential=token, project_id=project_id, goal="级联删除任务", revision="r1",
+        dirty_state=False, constraints=[], idempotency_key=uuid4(),
+    )["task_id"]
+    checkpoint_id = service.checkpoint_task(
+        credential=token, task_id=task_id, completed_work="走完任务链",
+        next_step="等待删除", problems="", revision="r2", requested_scope=f"project:{project_id}",
+        idempotency_key=uuid4(),
+    )["checkpoint_id"]
+
+    handlers = build_job_handlers(harness.factory, harness.tables, LocalStorage(
+        Path(harness.data_root) / "cascade-assets"))
+    run_pending_jobs(harness, handlers)
+    children = {decision["decision_id"], constraint["constraint_id"], task_id, checkpoint_id}
+    cards = [row for row in table_rows(harness, "search_index_entries",
+                                       owner_id=UUID(provisioned["owner_id"]))
+             if str(row["target_id"]) in children]
+    assert {str(row["target_id"]) for row in cards} == children  # indexed while alive
 
     set_review_access(
         harness.factory, harness.tables, client_id=provisioned["client_id"],
@@ -261,19 +284,25 @@ def test_governed_deletion_cascades_to_facts_and_seals_reads(harness):
         requested_scope="projects", idempotency_key=uuid4(),
     )
     preview = service.get_deletion_plan(credential=token, plan_id=plan["plan_id"])
-    assert {row["target_id"] for row in preview["impact_graph"][project_id]} == {
-        decision["decision_id"], constraint["constraint_id"],
-    }, "the approved plan must show the facts it will delete"
+    assert {row["target_id"] for row in preview["impact_graph"][project_id]} == children, \
+        "the approved plan must show the facts, tasks and checkpoints it will delete"
     service.resolve_review_item(
         credential=token, item_id=plan["review_item_id"], expected_version=1,
         decision="approved", idempotency_key=uuid4(),
     )
+    run_pending_jobs(harness, handlers)  # reconcile_deletion clears the cards
 
     assert _project_rows(harness, project_id)[0]["lifecycle_state"] == "deleted"
     for table, fact_id in (("decisions", decision["decision_id"]),
                            ("constraints", constraint["constraint_id"])):
         rows = table_rows(harness, table, id=UUID(fact_id))
         assert rows and rows[0]["lifecycle_state"] == "deleted", f"{table} kept its fact active"
+    survivor = [row for row in table_rows(harness, "search_index_entries",
+                                          owner_id=UUID(provisioned["owner_id"]))
+                if str(row["target_id"]) in children | {project_id}]
+    assert survivor == [], "no card may outlive the project it belonged to"
+    assert service.search_project(credential=token, project_id=project_id,
+                                  query="级联")["hits"] == []
 
     with pytest.raises(BrainError) as gone:
         service.get_project_context(credential=token, project_id=project_id)

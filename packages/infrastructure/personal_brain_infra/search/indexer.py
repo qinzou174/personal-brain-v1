@@ -155,6 +155,15 @@ class SearchIndexer:
                 project_id, text = task["project_id"], f"{row['completed_work']} {row['problems'] or ''} {row['next_step'] or ''}"
             else:
                 project_id, text = row["project_id"], " ".join(row["changed_paths"] or [])
+            # Children of a deleted project are gone for retrieval: tasks,
+            # checkpoints and observations carry no lifecycle_state of their own,
+            # so the parent project is their only gate.
+            parent_state = session.scalar(sa.select(self._tables["projects"].c.lifecycle_state).where(
+                self._tables["projects"].c.id == UUID(str(project_id)),
+                self._tables["projects"].c.owner_id == owner_id,
+            ))
+            if parent_state != "active":
+                raise BrainError("NOT_FOUND")
         return self._entry(
             target_type, target_id, f"project:{project_id}", "private", "canonical",
             "fresh", text, [f"{target_type}:{target_id}"],

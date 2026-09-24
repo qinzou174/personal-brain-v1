@@ -374,6 +374,32 @@ class AuthoritativeStore:
                         entry = (fact_type, UUID(self._external_id(fact_id)))
                         if entry not in declared:
                             declared.append(entry)
+                # Tasks and their checkpoints carry no lifecycle_state of their
+                # own, so only the plan can clear their retrieval cards: discover
+                # them under the project instead of relying on the caller.
+                tasks_table = self.tables.get("project_tasks")
+                if tasks_table is None:
+                    continue
+                task_ids = list(session.scalars(sa.select(tasks_table.c.id).where(
+                    tasks_table.c.owner_id == self._db_id(tasks_table, "owner_id", self.owner_id),
+                    tasks_table.c.project_id == self._db_id(tasks_table, "project_id", target_id),
+                )))
+                for task_id in task_ids:
+                    entry = ("project_task", UUID(self._external_id(task_id)))
+                    if entry not in declared:
+                        declared.append(entry)
+                checkpoints_table = self.tables.get("checkpoints")
+                if task_ids and checkpoints_table is not None:
+                    checkpoint_ids = session.scalars(sa.select(checkpoints_table.c.id).where(
+                        checkpoints_table.c.owner_id == self._db_id(
+                            checkpoints_table, "owner_id", self.owner_id,
+                        ),
+                        checkpoints_table.c.task_id.in_(task_ids),
+                    ))
+                    for checkpoint_id in checkpoint_ids:
+                        entry = ("checkpoint", UUID(self._external_id(checkpoint_id)))
+                        if entry not in declared:
+                            declared.append(entry)
         impact_graph = {str(target_id): [
             {"target_type": dep_type, "target_id": str(dep_id)}
             for dep_type, dep_id in resolved.get(target_id, [])
