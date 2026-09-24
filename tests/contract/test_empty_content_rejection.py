@@ -60,3 +60,17 @@ def test_save_note_accepts_nonempty_content():
     result = service.save_note(credential="opaque", content="有效笔记", requested_scope="knowledge",
                                idempotency_key=uuid.uuid4())
     assert result == {"ok": True}
+
+
+def test_search_core_rejects_empty_query():
+    """ISSUE-LT-004: retrieval entry must reject blank query."""
+    from personal_brain_server.api.authorized_tools import AuthorizedToolService
+    service = _make_service()
+    context = SimpleNamespace(owner_id=uuid.uuid4(), client_id=uuid.uuid4())
+    with pytest.raises(BrainError) as exc:
+        service._search_core(
+            context, query="   ", requested_scope="knowledge",
+            sensitivity_ceiling="private", query_embedding=None,
+            vector_model_version=None, limit=5,
+        )
+    assert exc.value.code == "VALIDATION_FAILED"

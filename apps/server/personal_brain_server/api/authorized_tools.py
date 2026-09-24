@@ -204,6 +204,8 @@ class AuthorizedToolService:
         (``search.read`` / ``context.read`` / ``project.read``) for this scope, so
         this core performs no additional grant check and never widens the scope.
         """
+        if not query or not query.strip():
+            raise BrainError("VALIDATION_FAILED")
         from personal_brain_domain.retrieval.router import classify_intent
 
         intent = classify_intent(query)
