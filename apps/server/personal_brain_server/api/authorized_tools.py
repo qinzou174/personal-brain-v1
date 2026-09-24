@@ -88,6 +88,8 @@ class AuthorizedToolService:
         self, *, credential: str, content: str, requested_scope: str,
         idempotency_key: UUID,
     ) -> dict[str, Any]:
+        if not content or not content.strip():
+            raise BrainError("VALIDATION_FAILED")
         context = self._authority.authenticate(credential)
         self._authority.authorize(
             context, tool="knowledge.write", scope=requested_scope, sensitivity="private",
@@ -108,6 +110,8 @@ class AuthorizedToolService:
         self, *, credential: str, content: str, requested_scope: str,
         idempotency_key: UUID, priority: int = 0,
     ) -> dict[str, Any]:
+        if not content or not content.strip():
+            raise BrainError("VALIDATION_FAILED")
         context = self._authority.authenticate(credential)
         self._authority.authorize(
             context, tool="todo.write", scope=requested_scope, sensitivity="private",
