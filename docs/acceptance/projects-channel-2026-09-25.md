@@ -91,7 +91,7 @@ update jobs set state='cancelled',
 | 索引卡生成：`decision:…`/`constraint:…`，`scope=project:71c8054f…` | OK（**新修 `_fact()` 在生产首次生效**） |
 | `list_projects` 含新项目 | OK |
 | 删除计划 preview→批准→`execution_state=completed` | OK |
-| 删除后 `list_projects`：项目转为 `lifecycle_state=deleted` 墓碑（**按设计仍列出**） | 设计如此，脚本按「消失」判定误报 FAIL |
+| 删除后 `list_projects`：项目转为 `lifecycle_state=deleted` 墓碑（冒烟当时仍列出；见 §4 B2，随后已改为只列存活） | 冒烟当时：设计如此（脚本按「消失」判定误报 FAIL）；现已修复 |
 | 墓碑：`project=deleted`；`decision=active` | 见 §4 B1（真实的遗留缺口） |
 | 删除 reconcile：`reconcile_deletion` 作业 succeeded，事实索引卡清零（cards_left=0） | OK |
 | `dead_letter` = 0 | OK |
@@ -117,16 +117,21 @@ alive_projects=0；open_review_grants(prod-trial@projects)=0；dead_letter=0
 冒烟自身残留：项目 `71c8054f…` 墓碑 1 行（治理删除的正常形态）+ 其两条事实行
 （见 §4 B1，属同一遗留缺口）+ 删除计划/审计/reconcile 记录（治理留痕，应保留）。
 
-## 4. 新发现与遗留（待拍板）
+## 4. 新发现与遗留
 
-| 编号 | 发现 | 证据 | 建议 |
+验收中发现的三个缺口，经用户拍板**当轮全部修复**（`f2becf1` 之后的补丁提交，见 §6）：
+
+| 编号 | 发现 | 证据 | 处置 |
 |---|---|---|---|
-| B1 | **删除计划不级联墓碑项目事实**：`_execute_approved_deletion_plan` 的 `table_for` 映射缺 `decision`/`constraint`/`change_event`，声明为 dependents 也只会写删除动作+清索引，事实行永远停在 `active` | 本轮：`project=deleted, decision=active`（含交接前的 b244d92e 三事实） | 小改：给 `table_for` 补三张事实表（`decisions`/`constraints`/`change_events`），补回归测试 |
-| B2 | `list_projects` 按设计返回墓碑并带 `lifecycle_state`（客户端需自行按 `lifecycle_state != 'deleted'` 过滤） | 本轮 7 条返回中 6 条为墓碑 | 若希望手机端「删了就消失」，可在服务端加存活过滤（行为变更，需拍板） |
-| B3 | `get_project_recovery` 不筛 `lifecycle_state`（已删项目仍可读回详情，前提是客户端仍持有该项目作用域） | 交接文档已记录；本轮未复测 | 补 `lifecycle_state='active'` 过滤 |
+| B1 | **删除计划不级联墓碑项目事实**：`_execute_approved_deletion_plan` 的 `table_for` 映射缺 `decision`/`constraint`/`change_event`，声明为 dependents 也只会写删除动作+清索引，事实行永远停在 `active` | 本轮：`project=deleted, decision=active`（含交接前的 b244d92e 三事实） | **已修**：`table_for` 补三张事实表，声明为依赖的事实随项目一起墓碑；回归 `test_governed_deletion_cascades_to_facts_and_seals_reads` |
+| B2 | `list_projects` 返回墓碑并带 `lifecycle_state`（客户端需自行过滤） | 本轮 7 条返回中 6 条为墓碑 | **已修（行为变更）**：服务端只列 `lifecycle_state='active'`，字段保留兼容 |
+| B3 | `get_project_recovery` 不筛 `lifecycle_state`（已删项目仍可读回详情，连带 `get_active_task`/`get_recent_changes`/`check_freshness`/`get_module_context` 四个工具） | 交接文档已记录；本轮复现 | **已修**：读路径加 `lifecycle_state='active'`，墓碑项目一律 `NOT_FOUND` |
 | B4 | ~~排序长度归一化是否提交部署~~ | 本轮已完成（§1、§3.4） | —— |
 | B5 | 手机端「主动性」四层方案（提示词/看提醒工具/归档脚本）只给过文字，未实施 | 交接文档遗留② | 待用户排期 |
 | B6 | 画像里可能仍有 open 的 `merge_candidate` 等用户在手机上批准 | 交接文档遗留③ | 用户手机侧处理 |
+| B7 | 写入路径未随删除封口：`record_project_fact`/`start_project_task`/`sync_workspace` 仍可对墓碑项目写入（前提客户端仍持该项目作用域） | 代码静态核查（未在真实环境触发） | **部分收口**：检索侧已封死（索引器按父项目状态门禁，写入也生不出卡）；写入仍会落行，属待拍板的残留 |
+| B8 | `NOT_FOUND` 在 MCP 层映射为 JSON-RPC `-32601`（"unknown method" 语义），已删项目读回时客户端可能误读为"工具不存在" | 本轮生产实测 `{"code": -32601, "message": "NOT_FOUND"}`（`remote.py` 注释称此为有意约定） | 观察项：若要更准确，可改映射为服务端错误段 `-32004` 之类并在 code 里保留字符串（需拍板） |
+| B9 | `project-access --access none` 只摘掉客户端 scopes 并把 epoch+1，不像 `review-access` 那样把授权行 `effective_to` 收口 | 代码审阅（`admin.py` 两处实现不对称）；生产数据亦可见 zafiro 对已删项目仍留 open 授权行 | 观察项：统一为"撤销即收口"（低风险，可随下次改动带上） |
 
 ## 5. 复现方式速查
 
@@ -139,4 +144,37 @@ uv run python deploy/windows-local/server_sql.py "<SQL>"
 docker compose -f deploy/compose.prod.yaml exec -T api python -m personal_brain_server rotate-client \
   --client-id <client-id> --credential-file /tmp/trial.cred
 # MCP 冒烟：C:\Users\槐至\AppData\Local\Temp\prod_projects_smoke.py <cred-file>
+# 删除封口终验：prod_seal_probe.py <cred-file> <phase>；孤儿子项清卡：prod_child_cleanup.py
 ```
+
+## 6. 用户拍板后的收尾补丁（2026-09-25 深夜续作第二轮）
+
+§4 的 B1/B2/B3 当轮修完后，生产终验又逐层暴露出三个「修复的连带缺口」，均已修复、部署、并在生产复验：
+
+| 提交 | 内容 | 触发证据 |
+|---|---|---|
+| `b1fd872` | 删除执行器 `table_for` 补 `decision`/`constraint`/`change_event`；`list_projects` 只列存活；`get_project_recovery` 加 `lifecycle_state='active'`（连带 4 个读类工具） | B1/B2/B3 |
+| `19c1614` | ① 删除计划**服务端自动发现**项目的三个事实表（客户端不声明也会随项目删除，预览里可见）；② 索引作业在源已墓碑时结算为 `{"indexed": false, "skipped": "source_gone"}` 的成功作业，不再死信 | 生产实测：删项目后仍在队列的刷新作业 dead_letter（NOT_FOUND），会让 `/doctor` 变不健康 |
+| `fa6ff94` | 事实表 `(owner_id, deduplication_key)` 唯一键与去重查询的 active 过滤不匹配：重复一条**已被删除**的语句会撞唯一键 → 未捕获 IntegrityError → HTTP 500。改为按生命周期分支：存活重复 → `duplicate` 回放；已删重复 → `{"status": "deleted", "persistence": "tombstone"}`（删除内容永不重建，与 `idempotency.py` 一致） | 生产实测：`record_decision` 复述已删语句 → 500（`uq_decisions_dedupe`） |
+| `9142c55` | ① 删除计划自动发现项目下的 `project_tasks` 与 `checkpoints`（这两张表没有 `lifecycle_state`，只能靠删除动作清卡，此前 2 张验收残留卡片就是这么留下的）；② 索引器 `_project` 对项目、任务、检查点、工作区观测统一按**父项目存活**门禁，杜绝晚到作业给已删项目重建卡片 | 生产实测：上一会话验收项目 b244d92e 删除后，其任务/检查点 2 张卡仍可被持作用域的客户端检索到 |
+
+生产终验（`prod_seal_probe.py final2`，MCP over LAN，**19/19 全绿**）：
+
+```
+cascade: project=deleted, decision=deleted          # 事实随项目墓碑
+read sealed: get_project_context -> NOT_FOUND       # 读路径封死
+discovery: list_projects -> []                      # 墓碑不再出现
+cards_left=0 (project/decision/task/checkpoint)     # 四类卡全清
+dedupe replay -> {"status":"deleted","persistence":"tombstone"}   # 不再 500
+dead_letters=0                                      # 无新增死信
+```
+
+另：先前那条竞态死信（`4e6019a9`，`refresh_project_context | decision:fb34dca0…`）部署后**重排执行成功**，
+结果 `{"indexed": false, "skipped": "source_gone", "target_ref": "decision:fb34dca0…"}` —— 同一作业由死信转为声明式跳过。
+
+本地回归（最终代码）：`uv run pytest tests -q --ignore=tests/benchmark` → **566 passed / 12 skipped / 0 failed**。
+
+收尾状态：`alive_projects=0`、`dead_letter=0`、`project 作用域索引卡=0`、`/doctor = healthy`；
+prod-trial 临时补的 `review.write@projects` 与全部临时 `project:<id>` 作用域已回收（撤销审计留痕），
+临时凭据 `/tmp/trial.cred` 已删；zafiro（手机端）epoch 未变、凭据未轮换，全程未受影响。
+历史验收项目 b244d92e 的 2 张孤儿子项卡片已走治理删除计划（`18531018…`）清除。
