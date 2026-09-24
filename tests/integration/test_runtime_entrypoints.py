@@ -24,6 +24,59 @@ def test_server_health_is_live_while_readiness_reflects_dependencies():
         assert response.json()["worker"] == "failed"
 
 
+def test_doctor_endpoint_reports_components_without_collapsing_http():
+    from personal_brain_server.runtime import create_app
+
+    app = create_app(
+        readiness_probe=lambda: {"ready": True, "database": "ok", "worker": "ok", "storage": "ok"},
+        doctor_probe=lambda: {
+            "overall": "healthy",
+            "components": {"disk": "healthy", "jobs": "healthy", "assets": "healthy", "relations": "healthy"},
+            "findings": [],
+            "metrics": {"disk_free_percent": 42.0, "failed_jobs": 0,
+                        "corrupted_assets": 0, "broken_relations": 0},
+        },
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {"status": "alive"}
+        response = client.get("/doctor")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["overall"] == "healthy"
+        assert body["components"]["jobs"] == "healthy"
+        assert body["metrics"]["failed_jobs"] == 0
+
+
+def test_doctor_endpoint_is_not_checked_when_no_probe_injected():
+    from personal_brain_server.runtime import create_app
+
+    app = create_app(readiness_probe=lambda: {"ready": True})
+    with TestClient(app) as client:
+        body = client.get("/doctor").json()
+        assert body == {"overall": "not_checked", "components": {}, "findings": []}
+
+
+def test_doctor_unchecked_assets_do_not_fabricate_findings(tmp_path):
+    """Unchecked components (value -1) must not surface fabricated findings."""
+    import sqlalchemy as sa
+    from personal_brain_server.runtime import build_doctor_probe, create_app
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.connect() as connection:
+        connection.execute(sa.text("create table jobs (id text, state text)"))
+    probe = build_doctor_probe(engine, tmp_path / "data")
+    report = probe()
+    # jobs table exists and is empty -> healthy; assets/relations absent -> not_checked
+    assert report["components"]["jobs"] == "healthy"
+    assert report["components"]["assets"] == "not_checked"
+    assert "assets:critical" not in report["findings"]
+
+    app = create_app(readiness_probe=lambda: {"ready": True}, doctor_probe=probe)
+    with TestClient(app) as client:
+        assert client.get("/doctor").status_code == 200
+    engine.dispose()
+
+
 def test_doctor_cli_reports_missing_configuration_as_json(monkeypatch, capsys):
     from personal_brain_server.__main__ import main
 

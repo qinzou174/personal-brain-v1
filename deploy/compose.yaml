@@ -18,6 +18,11 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   db:
     image: pgvector/pgvector:pg16
@@ -35,6 +40,11 @@ services:
       retries: 5
     networks: [internal]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   migrate:
     image: personal-brain-v1-runtime:local
@@ -47,6 +57,11 @@ services:
     secrets: [db_dsn]
     networks: [internal]
     restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   api:
     image: personal-brain-v1-runtime:local
@@ -88,6 +103,11 @@ services:
     secrets: [db_dsn, token_pepper, model_api_key]
     networks: [internal]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   worker:
     image: personal-brain-v1-runtime:local
@@ -119,6 +139,11 @@ services:
       - /home/kms/personal-brain-v1-data/model-proxy:/run/model-proxy
     networks: [internal]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   # Optional human-note interface (US12, removable client). NOT part of the
   # default stack: enabled only via `docker compose --profile extras ...`.

@@ -27,7 +27,7 @@ from personal_brain_server.bootstrap.settings import Settings, read_secret_file
 from personal_brain_server.protocols.mcp_dispatcher import MCPDispatcher
 from personal_brain_server.protocols.remote import create_mcp_router
 from personal_brain_server.protocols.tools import tool_definitions
-from personal_brain_server.runtime import build_readiness_probe, create_app
+from personal_brain_server.runtime import build_doctor_probe, build_readiness_probe, create_app
 from personal_brain_server.security.oauth_runtime import OAuthBearerAuthority
 from personal_brain_domain.common.errors import BrainError
 from personal_brain_server.admin import (
@@ -249,7 +249,11 @@ def main(argv: list[str] | None = None) -> int:
             dispatcher=dispatcher, resource=resource, authorization_server=base,
             allowed_origins=(),
         )
-        app = create_app(readiness_probe=readiness, protocol_router=protocol_router)
+        app = create_app(
+            readiness_probe=readiness,
+            protocol_router=protocol_router,
+            doctor_probe=build_doctor_probe(engine, settings.data_root),
+        )
         uvicorn.run(app, host=str(settings.bind_host), port=settings.bind_port, access_log=True)
         engine.dispose()
         return 0
