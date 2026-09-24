@@ -201,4 +201,6 @@ def test_production_worker_registry_covers_required_durable_work_categories(tmp_
         "bootstrap_project", "refresh_project_context", "parse_asset", "reprocess_asset",
         "rebuild_index", "reconcile_deletion", "health_check", "dispatch_notification",
         "retention_maintenance", "notify_review",
+        # Δ1-Δ4 activation: the periodic scheduler's job types must all be owned.
+        "daily_digest", "promote_candidates", "retention_sweep", "conflict_scan",
     } <= set(handlers)

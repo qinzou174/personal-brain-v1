@@ -74,6 +74,7 @@ class AuthoritativeStore:
         target_values: Callable[[UUID, UUID, datetime], dict[str, Any]] | None,
         result_key: str,
         job_type: str,
+        extra_jobs: tuple[str, ...] = (),
         pre_commit: Callable[[], None] | None = None,
         side_effect: Callable[[Session, UUID, UUID, datetime], None] | None = None,
         existing_target_id: UUID | None = None,
@@ -150,6 +151,18 @@ class AuthoritativeStore:
                 idempotency_key=self._db_id(jobs, "idempotency_key", idempotency_key),
                 state="queued", priority=0, attempts=0, max_attempts=5, available_at=now, claim_token=0,
             ))
+            # Additional intake-stage jobs (e.g. index + extract) commit in the
+            # same UnitOfWork, so a canonical write never loses a pipeline stage.
+            for extra_type in extra_jobs:
+                session.execute(jobs.insert().values(
+                    id=self._db_id(jobs, "id", uuid4()),
+                    owner_id=self._db_id(jobs, "owner_id", self.owner_id),
+                    client_id=self._db_id(jobs, "client_id", self.client_id),
+                    job_type=extra_type, payload_ref=f"{target_category}:{target_id}",
+                    idempotency_key=self._db_id(jobs, "idempotency_key", idempotency_key),
+                    state="queued", priority=0, attempts=0, max_attempts=5,
+                    available_at=now, claim_token=0,
+                ))
             session.execute(audit.insert().values(
                 id=self._db_id(audit, "id", audit_id), owner_id=self._db_id(audit, "owner_id", self.owner_id),
                 client_id=self._db_id(audit, "client_id", self.client_id),
@@ -177,11 +190,12 @@ class AuthoritativeStore:
         self, *, content: str, requested_scope: str, idempotency_key: UUID,
         pre_commit: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
+        """Two intake stages: retrieval projection (index) plus LLM extraction."""
         return self._commit_record(
             operation="save_note", idempotency_key=idempotency_key, source_text=content,
             requested_scope=requested_scope, tool="knowledge.write", target_category="raw_input",
             target_table=None, target_values=None, result_key="record_id",
-            job_type="extract_raw_input", pre_commit=pre_commit,
+            job_type="index_raw_input", extra_jobs=("extract_raw_input",), pre_commit=pre_commit,
         )
 
     def add_todo(

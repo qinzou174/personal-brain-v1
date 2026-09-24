@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from personal_brain_server.bootstrap.settings import Settings, read_secret_file
 from personal_brain_worker.runtime import DurableJobPoller, WorkerLoop
 from personal_brain_worker.job_handlers import build_job_handlers, build_job_recheck
+from personal_brain_worker.scheduler import PeriodicScheduler
 from personal_brain_infra.storage.local import LocalStorage
 from personal_brain_infra.models.gateway import ModelCard, ModelGateway
 from personal_brain_infra.models.volcengine import AnthropicCompatibleProvider, VolcengineEmbeddingProvider
@@ -60,15 +61,23 @@ def main() -> int:
         handlers = build_job_handlers(
             factory, metadata.tables, LocalStorage(settings.data_root / "assets"),
             gateway=gateway, embedder=embedder,
+            llm_daily_quota=settings.llm_daily_quota,
         )
         poller = DurableJobPoller(
             factory, jobs, worker_id="personal-brain-worker", handlers=handlers,
             recheck=build_job_recheck(factory, metadata.tables),
         )
+        scheduler = PeriodicScheduler(
+            factory, metadata.tables, timezone_name=settings.default_timezone,
+        )
+
+        def poll_and_schedule() -> None:
+            poller.poll()
+            scheduler.tick()
 
         for event in (signal.SIGINT, signal.SIGTERM):
             signal.signal(event, lambda *_: stop.set())
-        WorkerLoop(poll=poller.poll).run(stop_requested=stop.is_set)
+        WorkerLoop(poll=poll_and_schedule).run(stop_requested=stop.is_set)
         engine.dispose()
         return 0
     except (ValueError, sa.exc.SQLAlchemyError) as error:

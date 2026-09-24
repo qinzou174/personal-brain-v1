@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     embedding_model_name: str = "doubao-embedding-vision"
     embedding_dimensions: int = Field(default=1024, ge=1, le=4096)
     model_proxy_socket: Path | None = None
+    # Background LLM derivation (extraction/digest) is bounded by a per-local-day
+    # job budget instead of a per-call cap, so the backend can stay "alive"
+    # without unbounded cost.  Exceeding it degrades to rules only, never blocks
+    # canonical writes.
+    llm_daily_quota: int = Field(default=200, ge=1, le=10000)
 
     @field_validator("data_root", "database_dsn_file", "token_pepper_file", "model_api_key_file", "model_proxy_socket")
     @classmethod

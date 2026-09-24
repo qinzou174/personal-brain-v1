@@ -121,7 +121,7 @@ def test_full_chain_upgrade_postvalidation_and_reverse_downgrade(tmp_path):
                 valid_from=now, valid_to=None, lifecycle_state="active", deleted_at=None,
             ))
             connection.execute(tables["jobs"].insert().values(
-                id=job_id, owner_id=owner_id, client_id=client_id, job_type="extract_raw_input",
+                id=job_id, owner_id=owner_id, client_id=client_id, job_type="index_raw_input",
                 payload_ref=f"raw_input:{raw_id}", idempotency_key=request_key, state="queued",
                 priority=0, attempts=0, max_attempts=5, available_at=now, claim_token=0,
             ))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 
@@ -13,12 +13,19 @@ from personal_brain_infra.search.indexer import SearchIndexer
 from personal_brain_infra.storage.base import StorageBackend
 from personal_brain_domain.common.errors import BrainError
 from personal_brain_domain.security.secret_filter import detect_secret
+from personal_brain_worker.digest import make_digest_handler
+from personal_brain_worker.evolution import (
+    make_conflict_handler, make_promote_handler, make_retention_handler,
+)
+from personal_brain_worker.extraction import make_extract_handler
 from personal_brain_worker.runtime import JobExecutionError
 
 
 def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
                        storage: StorageBackend, gateway: Any | None = None,
-                       embedder: Any | None = None) -> dict[str, Any]:
+                       embedder: Any | None = None, *,
+                       llm_daily_quota: int = 200,
+                       timezone_name: str = "Asia/Shanghai") -> dict[str, Any]:
     indexer = SearchIndexer(session_factory, tables, embedder=embedder)
 
     def index(job, context):
@@ -156,7 +163,18 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
                 "removed_edges": removed_edges}
 
     def health_check(job, context):
+        """Collect health evidence and raise one deduplicated inbox notice.
+
+        FR-089..FR-091/ER-11: only explicit triggers may notify; detection and
+        notification stay separate, the 60-minute cooldown merges a repeated
+        failure, and a healthy brain produces no notification at all.
+        """
+        from personal_brain_domain.operations.notification_policy import decide_send
+        from personal_brain_domain.operations.notification_triggers import evaluate_trigger
+
         owner_id = UUID(str(job["owner_id"]))
+        moment = datetime.now(timezone.utc)
+        notified = False
         with session_factory.begin() as session:
             failed_jobs = session.scalar(sa.select(sa.func.count()).select_from(tables["jobs"]).where(
                 tables["jobs"].c.owner_id == owner_id, tables["jobs"].c.state == "dead_letter",
@@ -164,8 +182,39 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
             stale_modules = session.scalar(sa.select(sa.func.count()).select_from(tables["module_cards"]).where(
                 tables["module_cards"].c.owner_id == owner_id, tables["module_cards"].c.freshness == "stale",
             ))
+            failed_jobs, stale_modules = int(failed_jobs or 0), int(stale_modules or 0)
+            if failed_jobs:
+                notifications, jobs = tables["notifications"], tables["jobs"]
+                decision = evaluate_trigger(trigger_type="brain_health_failure", risk="high")
+                dedupe_key = f"brain_health_failure:{owner_id}:{moment:%Y-%m-%d}"
+                last_sent = session.scalar(sa.select(sa.func.max(notifications.c.created_at)).where(
+                    notifications.c.owner_id == owner_id,
+                    notifications.c.dedupe_key == dedupe_key,
+                ))
+                minutes_ago = 10**6 if last_sent is None else (moment - last_sent).total_seconds() / 60.0
+                if decision.notify and decide_send(
+                    dedupe_key=dedupe_key, last_sent_minutes_ago=minutes_ago, cooldown_minutes=60,
+                ).send:
+                    notification_id = uuid4()
+                    session.execute(notifications.insert().values(
+                        id=notification_id, owner_id=owner_id, trigger_type="brain_health_failure",
+                        source_object_id=None, risk="high", priority=decision.priority,
+                        dedupe_key=dedupe_key, cooldown_group="brain_health", channel="inbox",
+                        state="queued",
+                        reason=f"failed_jobs={failed_jobs} stale_modules={stale_modules}",
+                        delivered_at=None, acknowledged_at=None,
+                    ))
+                    session.execute(jobs.insert().values(
+                        id=uuid4(), owner_id=owner_id, client_id=None,
+                        job_type="dispatch_notification",
+                        payload_ref=f"notification:{notification_id}",
+                        idempotency_key=uuid5(NAMESPACE_URL, f"brain-health-notify:{notification_id}"),
+                        state="queued", priority=0, attempts=0, max_attempts=5,
+                        available_at=moment, claim_token=0,
+                    ))
+                    notified = True
         context.progress(100, "health evidence collected")
-        return {"failed_jobs": int(failed_jobs or 0), "stale_modules": int(stale_modules or 0)}
+        return {"failed_jobs": failed_jobs, "stale_modules": stale_modules, "notified": notified}
 
     def dispatch_notification(job, context):
         try:
@@ -199,14 +248,26 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
         context.progress(100, "bounded retention applied")
         return {"pruned_jobs": result.rowcount}
 
+    extract = make_extract_handler(
+        session_factory, tables, storage, gateway, quota=llm_daily_quota,
+        timezone_name=timezone_name,
+    )
+    digest = make_digest_handler(
+        session_factory, tables, storage, gateway, embedder, quota=llm_daily_quota,
+        timezone_name=timezone_name,
+    )
     return {
-        "extract_raw_input": index, "index_raw_input": index, "index_todo": index,
+        "extract_raw_input": extract, "index_raw_input": index, "index_todo": index,
         "index_self_claim": index, "bootstrap_project": index,
         "refresh_project_context": index, "parse_asset": parse_asset,
         "reprocess_asset": parse_asset, "notify_review": inbox_only,
         "rebuild_index": index, "reconcile_deletion": reconcile_deletion,
         "health_check": health_check, "dispatch_notification": dispatch_notification,
         "retention_maintenance": prune_rebuildable, "provider_derive": provider_derive,
+        "promote_candidates": make_promote_handler(session_factory, tables),
+        "retention_sweep": make_retention_handler(session_factory, tables),
+        "conflict_scan": make_conflict_handler(session_factory, tables),
+        "daily_digest": digest,
     }
 
 

@@ -339,7 +339,9 @@ def test_all_canonical_domains_share_durable_uow_and_operation_status(tmp_path):
         for name in ("todos", "projects", "self_claims", "review_inbox_items"):
             assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables[name])) == 1
         assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["raw_inputs"])) == 7
-        assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["jobs"])) == 7
+        # save_note commits two intake jobs (index + extract); the other six
+        # canonical writes commit one each.
+        assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["jobs"])) == 8
         assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["audit_events"])) == 7
     engine.dispose()
 

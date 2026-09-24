@@ -19,6 +19,10 @@ derivations; permission/scope predicates run before retrieval.
 5. **Derived processors** parse, summarize, embed, rank and digest immutable
    canonical inputs; every output carries source and version lineage.
 6. **Worker** claims durable jobs with leases, retries and idempotent handlers.
+   A built-in daily scheduler (`personal_brain_worker/scheduler.py`) enqueues the
+   periodic work (digest, candidate promotion, retention, conflict scan, health)
+   exactly once per owner and local day, so the backend evolves without user
+   interaction.
 7. **Local bridge** observes only an approved workspace root.
 8. **Operations** own migration, backup, restore verification, integrity checks,
    retention, health and growth without bypassing domain safeguards.
