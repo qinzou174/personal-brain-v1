@@ -18,16 +18,30 @@ from personal_brain_server.protocols.mcp_dispatcher import MCPDispatcher, PROTOC
 
 _logger = logging.getLogger("personal_brain.protocol")
 
+# Transport status per stable code. Everything else is a bad request (400); the
+# two 401 codes are the only ones that mean "your credential is the problem", so
+# clients that key their retry/rotate logic on 401 cannot be misled by an Origin
+# refusal or a forgotten MCP session.
+_HTTP_STATUS = {
+    "AUTH_INVALID": 401, "AUTH_REQUIRED": 401, "CLIENT_REVOKED": 401,
+    "ORIGIN_NOT_ALLOWED": 403,
+}
+# JSON-RPC code per stable code: NOT_FOUND keeps a server-range code of its own
+# instead of -32601, which the spec reserves for "method not found" (a deleted
+# project is not a missing method).
+_JSONRPC_CODE = {"NOT_FOUND": -32004}
+
 
 def validate_origin(origin: str, *, allowed_origins: Iterable[str]) -> str:
-    """Reject any Origin that is not an exact HTTPS match from the allowlist.
+    """Reject any Origin that is not an exact match from the allowlist.
 
-    ``null``, http, and cross-site origins are rejected outright so browser
-    sessions cannot forge the trusted remote endpoint.
+    An empty allowlist denies every Origin-bearing request by design (native MCP
+    clients send none); configure ``BRAIN_ALLOWED_ORIGINS`` when a browser-based
+    client must connect.
     """
     allowed = frozenset(allowed_origins)
     if origin not in allowed:
-        raise BrainError("AUTH_INVALID")
+        raise BrainError("ORIGIN_NOT_ALLOWED")
     return origin
 
 
@@ -78,10 +92,11 @@ def create_mcp_router(
                 session_id=mcp_session_id,
             )
         except BrainError as error:
-            status = 401 if error.code in {"AUTH_INVALID", "AUTH_REQUIRED", "CLIENT_REVOKED"} else 400
-            # JSON-RPC 2.0: unknown method/tool is -32601; other rejections use
-            # the server-error range (-32000) with the Brain error code string.
-            jsonrpc_code = -32601 if error.code == "NOT_FOUND" else -32000
+            status = _HTTP_STATUS.get(error.code, 400)
+            # JSON-RPC 2.0: unknown method/tool is -32601; NOT_FOUND carries its
+            # own server-range code; every other rejection uses -32000 with the
+            # stable Brain code as the message.
+            jsonrpc_code = _JSONRPC_CODE.get(error.code, -32000)
             # Body-free operational log: reason and outcome only, never the
             # request body, credential or client identity (FR-070/FR-073).
             _logger.warning("mcp rejected status=%s code=%s method=%s", status, error.code, request.method)

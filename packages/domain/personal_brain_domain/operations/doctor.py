@@ -27,7 +27,7 @@ def aggregate_health(*, components: dict[str, str]) -> dict[str, object]:
 
 
 def check_components(*, disk_free_percent: float, assets_corrupted: tuple[str, ...],
-                     relations_broken: int) -> list[str]:
+                     relations_broken: int, unchecked: tuple[str, ...] = ()) -> list[str]:
     findings = []
     if disk_free_percent <= 5:
         findings.append("disk:critical:free space critical")
@@ -37,4 +37,9 @@ def check_components(*, disk_free_percent: float, assets_corrupted: tuple[str, .
         findings.append("assets:critical:corrupt asset detected")
     if relations_broken:
         findings.append("relations:warn:broken relation detected")
+    for component in unchecked:
+        # A check that could not run is itself a finding: silence here once made
+        # /doctor report a healthy system while its asset/relation probes were
+        # failing on every call.
+        findings.append(f"{component}:warn:check unavailable")
     return findings

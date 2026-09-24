@@ -1,0 +1,188 @@
+# Personal Brain V1 production stack (LAN host 192.168.10.7).
+#
+# This file is committed so the deployed stack and the repository cannot drift:
+# the api/worker image is built from this repository, the domain data lives in the
+# named volumes, and every secret is mounted from a file (never embedded).
+#
+# Deploy:
+#   cd /home/kms/personal-brain-v1-prod && git pull --ff-only && \
+#     BRAIN_DB_PASSWORD_FILE=<secrets>/db_password BRAIN_DB_DSN_FILE=<secrets>/db_dsn \
+#     BRAIN_TOKEN_PEPPER_FILE=<secrets>/token_pepper BRAIN_MODEL_API_KEY_FILE=<secrets>/model_api_key \
+#     docker compose -f deploy/compose.prod.yaml up -d --build api worker
+name: personal-brain-v1-prod
+
+services:
+  model-proxy:
+    image: personal-brain-v1-runtime:local
+    command: ["python", "-m", "personal_brain_server.model_proxy"]
+    network_mode: host
+    environment:
+      BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
+    volumes:
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/model-proxy/ark.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_DB: brain
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - brain-db:/var/lib/postgresql/data
+    secrets: [db_password]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  migrate:
+    image: personal-brain-v1-runtime:local
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BRAIN_DATABASE_DSN_FILE: /run/secrets/db_dsn
+    secrets: [db_dsn]
+    networks: [internal]
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  api:
+    image: personal-brain-v1-runtime:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      # The target host intentionally has no route from Docker's default build
+      # network, while host-network HTTPS is available.  This applies only to
+      # the trusted image build; runtime services remain on `internal`.
+      network: host
+    command: ["python", "-m", "personal_brain_server"]
+    ports:
+      - "192.168.10.7:18083:18083"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      model-proxy:
+        condition: service_healthy
+    environment:
+      BRAIN_ENVIRONMENT: production
+      BRAIN_BIND_HOST: 0.0.0.0
+      BRAIN_PUBLISHED_HOST: 192.168.10.7
+      BRAIN_CONTAINERIZED: "true"
+      BRAIN_BIND_PORT: 18083
+      # OAuth discovery and audience must name the URL external clients actually
+      # use (the HTTPS tunnel in front of nginx -> 18083), not the LAN address.
+      BRAIN_PUBLIC_BASE_URL: https://www.h2d954063.nyat.app:43086/brain
+      BRAIN_DATA_ROOT: /srv/brain/data
+      BRAIN_DATABASE_DSN_FILE: /run/secrets/db_dsn
+      BRAIN_TOKEN_PEPPER_FILE: /run/secrets/token_pepper
+      BRAIN_EXTERNAL_MODELS_ENABLED: "true"
+      BRAIN_MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      BRAIN_CHAT_MODEL_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
+      BRAIN_CHAT_MODEL_NAME: deepseek-v4.1-flash
+      BRAIN_EMBEDDING_BASE_URL: https://ark.cn-beijing.volces.com/api/coding/v3
+      BRAIN_EMBEDDING_MODEL_NAME: doubao-embedding-vision
+      BRAIN_EMBEDDING_DIMENSIONS: "1024"
+      BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
+    volumes:
+      - brain-data:/srv/brain/data
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+    secrets: [db_dsn, token_pepper, model_api_key]
+    networks: [internal]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  worker:
+    image: personal-brain-v1-runtime:local
+    command: ["python", "-m", "personal_brain_worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      model-proxy:
+        condition: service_healthy
+    secrets: [db_dsn, token_pepper, model_api_key]
+    environment:
+      BRAIN_ENVIRONMENT: production
+      BRAIN_BIND_HOST: 0.0.0.0
+      BRAIN_PUBLISHED_HOST: 192.168.10.7
+      BRAIN_CONTAINERIZED: "true"
+      BRAIN_DATA_ROOT: /srv/brain/data
+      BRAIN_DATABASE_DSN_FILE: /run/secrets/db_dsn
+      BRAIN_TOKEN_PEPPER_FILE: /run/secrets/token_pepper
+      BRAIN_EXTERNAL_MODELS_ENABLED: "true"
+      BRAIN_MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      BRAIN_CHAT_MODEL_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
+      BRAIN_CHAT_MODEL_NAME: deepseek-v4.1-flash
+      BRAIN_EMBEDDING_BASE_URL: https://ark.cn-beijing.volces.com/api/coding/v3
+      BRAIN_EMBEDDING_MODEL_NAME: doubao-embedding-vision
+      BRAIN_EMBEDDING_DIMENSIONS: "1024"
+      BRAIN_MODEL_PROXY_SOCKET: /run/model-proxy/ark.sock
+    volumes:
+      - brain-data:/srv/brain/data
+      - /home/kms/personal-brain-v1-prod-data/model-proxy:/run/model-proxy
+    networks: [internal]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Optional human-note interface (US12, removable client). NOT part of the
+  # default stack: enabled only via `docker compose --profile extras ...`.
+  # The Brain core never depends on this service (FR-100).
+  trilium:
+    image: zadam/trilium:latest
+    profiles: ["extras"]
+    environment:
+      TRILIUM_DATA_DIR: /home/node/trilium-data
+    volumes:
+      - trilium-data:/home/node/trilium-data
+    networks: [internal]
+    restart: unless-stopped
+
+volumes:
+  brain-db: {}
+  brain-data: {}
+  trilium-data: {}
+
+networks:
+  internal: {}
+
+secrets:
+  db_password:
+    file: ${BRAIN_DB_PASSWORD_FILE:?set BRAIN_DB_PASSWORD_FILE}
+  db_dsn:
+    file: ${BRAIN_DB_DSN_FILE:?set BRAIN_DB_DSN_FILE}
+  token_pepper:
+    file: ${BRAIN_TOKEN_PEPPER_FILE:?set BRAIN_TOKEN_PEPPER_FILE}
+  model_api_key:
+    file: ${BRAIN_MODEL_API_KEY_FILE:?set BRAIN_MODEL_API_KEY_FILE}

@@ -180,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
         opaque_authority = PersistedAuthority(factory, metadata.tables)
         public_host = settings.published_host or settings.bind_host
-        base = f"http://{public_host}:{settings.bind_port}"
+        # OAuth discovery/audience must match the URL clients actually use: an
+        # HTTPS tunnel or reverse proxy is configured explicitly instead of being
+        # mis-advertised as the LAN http endpoint.
+        base = settings.public_base_url or f"http://{public_host}:{settings.bind_port}"
         resource = f"{base}/mcp"
         authority = OAuthBearerAuthority(
             grant_store=PersistedOAuthGrantStore(factory, metadata.tables),
@@ -269,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         protocol_router = create_mcp_router(
             dispatcher=dispatcher, resource=resource, authorization_server=base,
-            allowed_origins=(),
+            allowed_origins=settings.origin_allowlist(),
         )
         app = create_app(
             readiness_probe=readiness,

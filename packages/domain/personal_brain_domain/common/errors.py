@@ -12,6 +12,10 @@ STABLE_CODES = frozenset({
     "STALE_PROJECT_CONTEXT", "SECRET_REJECTED", "PAYLOAD_TOO_LARGE", "ARCHIVE_LIMIT_EXCEEDED",
     "WORKSPACE_BOUNDARY_VIOLATION", "BRAIN_UNAVAILABLE", "JOB_ACCEPTED",
     "DEPENDENCY_CONFLICT", "INTERNAL_SAFE_ERROR",
+    # Protocol-level rejections kept distinct from credential failures: a denied
+    # Origin or a lost MCP session must not push clients into rotating (and thus
+    # breaking) a perfectly valid credential.
+    "ORIGIN_NOT_ALLOWED", "MCP_SESSION_REQUIRED",
 })
 
 _CONFLICT_CODES = frozenset({"VERSION_CONFLICT", "IDEMPOTENCY_CONFLICT", "DEPENDENCY_CONFLICT"})
@@ -40,6 +44,8 @@ _SAFE_MESSAGES = {
     "BRAIN_UNAVAILABLE": "The Brain is temporarily unavailable.",
     "DEPENDENCY_CONFLICT": "A dependent item prevents this change.",
     "INTERNAL_SAFE_ERROR": "The operation failed safely.",
+    "ORIGIN_NOT_ALLOWED": "This request origin is not allowed.",
+    "MCP_SESSION_REQUIRED": "The MCP session is missing or expired; initialize again.",
 }
 
 

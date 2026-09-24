@@ -65,25 +65,41 @@ def build_doctor_probe(engine: sa.Engine, data_root: Path) -> DoctorProbe:
         failed_jobs = -1
         corrupted_assets = -1
         broken_relations = -1
+        unchecked: list[str] = []
         try:
             with engine.connect() as connection:
                 inspector = sa.inspect(connection)
                 tables = set(inspector.get_table_names())
-                if "jobs" in tables:
-                    failed_jobs = connection.scalar(sa.text(
-                        "select count(*) from jobs where state in ('failed', 'dead_letter')"
-                    ))
-                if "assets" in tables:
-                    corrupted_assets = connection.scalar(sa.text(
-                        "select count(*) from assets where processing_state = 'corrupted' "
-                        "or integrity = 'corrupted'"
-                    ))
-                if "relations" in tables:
-                    broken_relations = connection.scalar(sa.text(
-                        "select count(*) from relations where source_id is null or target_id is null"
-                    ))
+                checks = (
+                    ("jobs", "jobs",
+                     "select count(*) from jobs where state in ('failed', 'dead_letter')"),
+                    ("assets", "assets",
+                     "select count(*) from assets where integrity_state in "
+                     "('corrupted', 'hash_mismatch', 'missing') or processing_state = 'failed'"),
+                    ("relations", "relations",
+                     "select count(*) from relations where subject_id is null or object_id is null"),
+                )
+                for component, table_name, statement in checks:
+                    if table_name not in tables:
+                        continue
+                    try:
+                        value = connection.scalar(sa.text(statement))
+                    except sa.exc.SQLAlchemyError:
+                        # A check that cannot run must say so instead of pretending:
+                        # silently swallowed SQL errors once made this whole probe a
+                        # false "healthy" for assets and relations.
+                        unchecked.append(component)
+                        continue
+                    if component == "jobs":
+                        failed_jobs = value
+                    elif component == "assets":
+                        corrupted_assets = value
+                    else:
+                        broken_relations = value
         except sa.exc.SQLAlchemyError:
-            pass
+            # The database itself is unreachable: report every persisted check as
+            # unrun rather than failing the endpoint.
+            unchecked.extend(["jobs", "assets", "relations"])
         components = {
             "disk": "degraded" if disk_free_percent <= 15 else (
                 "critical" if disk_free_percent <= 5 else "healthy"),
@@ -95,6 +111,7 @@ def build_doctor_probe(engine: sa.Engine, data_root: Path) -> DoctorProbe:
             disk_free_percent=disk_free_percent,
             assets_corrupted=("assets",) if corrupted_assets > 0 else (),
             relations_broken=broken_relations if broken_relations > 0 else 0,
+            unchecked=tuple(unchecked),
         )
         return {
             **aggregate_health(components=components),

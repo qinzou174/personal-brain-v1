@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     # without unbounded cost.  Exceeding it degrades to rules only, never blocks
     # canonical writes.
     llm_daily_quota: int = Field(default=200, ge=1, le=10000)
+    # MCP transport policy: native clients send no Origin header and are always
+    # accepted; browser-based clients must be named here (comma-separated exact
+    # origins, e.g. "https://app.example.test"). Empty denies every Origin.
+    allowed_origins: str = ""
+    # Public entry point (scheme://host[:port][/path]) used for OAuth discovery and
+    # audience binding when the service is reached through a tunnel or reverse
+    # proxy; without it the LAN endpoint is advertised.
+    public_base_url: str | None = None
 
     @field_validator("data_root", "database_dsn_file", "token_pepper_file", "model_api_key_file", "model_proxy_socket")
     @classmethod
@@ -58,6 +66,20 @@ class Settings(BaseSettings):
         if not value.is_absolute() or ".." in value.parts:
             raise ValueError("configuration path must be absolute and normalized")
         return value
+
+    @field_validator("public_base_url")
+    @classmethod
+    def require_absolute_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("public base url must be an absolute http(s) URL")
+        return value.rstrip("/")
+
+    def origin_allowlist(self) -> tuple[str, ...]:
+        """The exact Origin values the MCP endpoint accepts (empty = none)."""
+        return tuple(item.strip() for item in self.allowed_origins.split(",") if item.strip())
 
     @model_validator(mode="after")
     def require_safe_bind(self) -> Self:
@@ -109,6 +131,8 @@ class Settings(BaseSettings):
             "chat_model_name": self.chat_model_name if self.external_models_enabled else "disabled",
             "embedding_model_name": self.embedding_model_name if self.external_models_enabled else "disabled",
             "embedding_dimensions": self.embedding_dimensions if self.external_models_enabled else 0,
+            "allowed_origins": len(self.origin_allowlist()),
+            "public_base_url": self.public_base_url or "",
         }
 
 

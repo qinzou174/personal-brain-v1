@@ -24,6 +24,53 @@ def test_server_health_is_live_while_readiness_reflects_dependencies():
         assert response.json()["worker"] == "failed"
 
 
+def test_doctor_counts_real_corruption_with_the_actual_column_names(tmp_path):
+    """Regression: the probe once queried `assets.integrity` and `relations.target_id`
+    — columns that do not exist — so real corruption was reported as unchecked."""
+    import sqlalchemy as sa
+    from personal_brain_server.runtime import build_doctor_probe
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            "create table jobs (id text, state text)"
+        ))
+        connection.execute(sa.text(
+            "create table assets (id text, integrity_state text, processing_state text)"
+        ))
+        connection.execute(sa.text("insert into assets values ('a1', 'corrupted', 'ready')"))
+        connection.execute(sa.text("insert into assets values ('a2', 'valid', 'failed')"))
+        connection.execute(sa.text(
+            "create table relations (id text, subject_id text, object_id text)"
+        ))
+        connection.execute(sa.text("insert into relations values ('r1', null, 'x')"))
+    probe = build_doctor_probe(engine, tmp_path / "data")
+    report = probe()
+    assert report["components"]["assets"] == "failed"
+    assert report["components"]["relations"] == "degraded"
+    assert report["metrics"]["corrupted_assets"] == 2  # one corrupt + one failed parse
+    assert report["metrics"]["broken_relations"] == 1
+    assert "assets:critical:corrupt asset detected" in report["findings"]
+    assert "relations:warn:broken relation detected" in report["findings"]
+    engine.dispose()
+
+
+def test_doctor_declares_a_check_as_unavailable_instead_of_hiding_it(tmp_path):
+    import sqlalchemy as sa
+    from personal_brain_server.runtime import build_doctor_probe
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.connect() as connection:
+        connection.execute(sa.text("create table jobs (id text, state text)"))
+        # A schema the probe cannot query: the failure must surface as a finding.
+        connection.execute(sa.text("create table assets (id text, unrelated text)"))
+    probe = build_doctor_probe(engine, tmp_path / "data")
+    report = probe()
+    assert report["components"]["assets"] == "not_checked"
+    assert "assets:warn:check unavailable" in report["findings"]
+    engine.dispose()
+
+
 def test_doctor_endpoint_reports_components_without_collapsing_http():
     from personal_brain_server.runtime import create_app
 
