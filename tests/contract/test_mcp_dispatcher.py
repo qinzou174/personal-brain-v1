@@ -37,7 +37,9 @@ def test_full_fr099_surface_has_closed_noncredential_input_schemas():
 
     definitions = {item["name"]: item for item in tool_definitions()}
     assert set(definitions) == set(FR099_TOOL_NAMES)
-    assert len(definitions) == 30
+    # 30 -> 32 on 2026-09-25: the review inbox became reachable from a client
+    # (list_review_items / resolve_review_item), so the governance loop closes.
+    assert len(definitions) == 32
     for definition in definitions.values():
         schema = definition["inputSchema"]
         assert schema["type"] == "object" and schema["additionalProperties"] is False

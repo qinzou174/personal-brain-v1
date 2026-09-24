@@ -572,8 +572,13 @@ class AuthorizedToolService:
     def resolve_review_item(self, *, credential: str, item_id: UUID, expected_version: int,
                             decision: str, idempotency_key: UUID) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
+        # ER-06 without the old circularity: this call *is* the confirmation, and
+        # its proof is the version-bound single-use review item (15-minute expiry,
+        # owner-bound resolver) which the store consumes transactionally. Raising
+        # CONFIRMATION_REQUIRED here would demand a confirmation to confirm — the
+        # loop could never close. Ordinary risk keeps the permission check.
         recheck = lambda: self._authority.authorize(
-            context, tool="review.write", scope="review", sensitivity="private", risk="high_risk_deletion",
+            context, tool="review.write", scope="review", sensitivity="private",
         )
         recheck()
         store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
@@ -588,8 +593,13 @@ class AuthorizedToolService:
                              dependents: dict[str, list[list[str]]], requested_scope: str,
                              idempotency_key: UUID) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
+        # ER-06: proposing a plan destroys nothing — it persists a preview plus a
+        # version-bound, single-use confirmation item with a 15-minute expiry. The
+        # confirmation gate is therefore answered *with* the pending plan (D1:
+        # "CONFIRMATION_REQUIRED + 计划详情"), not by refusing to create it; the
+        # destructive execution happens only inside the approved-item path.
         recheck = lambda: self._authority.authorize(
-            context, tool="review.write", scope=requested_scope, sensitivity="private", risk="high_risk_deletion",
+            context, tool="review.write", scope=requested_scope, sensitivity="private",
         )
         recheck()
         store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
@@ -601,7 +611,13 @@ class AuthorizedToolService:
             requested_scope=requested_scope, idempotency_key=idempotency_key, pre_commit=recheck,
         )
         recheck()
-        return result
+        return {
+            **result, "confirmation_required": True,
+            "confirmation_hint": (
+                "review the pending deletion_confirmation item and approve it with "
+                "resolve_review_item(item_id=review_item_id, expected_version=1, decision=approved)"
+            ),
+        }
 
     def get_deletion_plan(self, *, credential: str, plan_id: UUID) -> dict[str, Any]:
         context = self._authority.authenticate(credential)

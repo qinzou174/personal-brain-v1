@@ -37,6 +37,10 @@ FR099_TOOL_NAMES = frozenset({
     "checkpoint_task", "finalize_task", "record_decision", "record_constraint",
     "sync_workspace", "upload_asset", "get_operation_status", "create_project",
     "propose_self_claim", "create_review_item", "create_deletion_plan", "get_deletion_plan",
+    # D1/D2 2026-09-25: without these two the governance loop could not close from
+    # a client — a plan or merge candidate could be created but never seen or
+    # approved. The surface grows 30 -> 32.
+    "list_review_items", "resolve_review_item",
 })
 
 _UUID = {"type": "string", "format": "uuid"}
@@ -128,6 +132,12 @@ _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
                                                 "additionalProperties": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
                                     requested_scope=_TEXT, idempotency_key=_UUID),
     "get_deletion_plan": _schema(("plan_id",), plan_id=_UUID),
+    "list_review_items": _schema(
+        state={"enum": ["open", "deferred", "approved", "rejected"]},
+    ),
+    "resolve_review_item": _schema(("item_id", "expected_version", "decision", "idempotency_key"),
+                                   item_id=_UUID, expected_version={"type": "integer", "minimum": 1},
+                                   decision={"enum": ["approved", "rejected"]}, idempotency_key=_UUID),
 }
 
 

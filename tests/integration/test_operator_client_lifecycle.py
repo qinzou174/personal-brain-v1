@@ -278,16 +278,26 @@ def test_review_access_grant_unlocks_the_governance_gate_on_a_content_scope(tmp_
     assert gated.value.code == "CONFIRMATION_REQUIRED"
 
     from personal_brain_server.api.authorized_tools import AuthorizedToolService
+    from types import SimpleNamespace
 
-    service = AuthorizedToolService(
-        authority, lambda **kwargs: pytest.fail("store must not be reached before confirmation"),
+    stored = []
+
+    def fake_store(**kwargs):
+        stored.append(kwargs)
+        return SimpleNamespace(create_deletion_plan=lambda **_: {
+            "status": "accepted", "plan_id": "p-1", "review_item_id": "r-1",
+            "execution_state": "preview", "confirmation_state": "pending",
+        })
+
+    service = AuthorizedToolService(authority, fake_store)
+    plan = service.create_deletion_plan(
+        credential=token, targets=[["raw_input", str(uuid4())]], dependents={},
+        requested_scope="knowledge", idempotency_key=uuid4(),
     )
-    with pytest.raises(BrainError) as service_gate:
-        service.create_deletion_plan(
-            credential=token, targets=[["raw_input", str(uuid4())]], dependents={},
-            requested_scope="knowledge", idempotency_key=uuid4(),
-        )
-    assert service_gate.value.code == "CONFIRMATION_REQUIRED"
+    # The proposal reaches the store (it destroys nothing) and answers the gate
+    # with the pending plan + its single-use confirmation item.
+    assert stored and plan["confirmation_required"] is True
+    assert plan["confirmation_state"] == "pending" and plan["review_item_id"] == "r-1"
 
     set_review_access(
         factory, metadata.tables, client_id=provisioned["client_id"], scope="knowledge",

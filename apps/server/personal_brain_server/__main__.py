@@ -230,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             "get_self_context",
             "search_brain", "search_project", "get_brain_context", "answer_brain",
             "upload_asset", "create_deletion_plan", "get_deletion_plan",
+            "list_review_items", "resolve_review_item",
         }
 
         def invoke(name: str, arguments: dict, identity: tuple[object, str]) -> dict:

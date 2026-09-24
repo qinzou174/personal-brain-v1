@@ -41,15 +41,16 @@ class RealPostgresHarness:
     def __init__(self, dsn: str, harden_schema: str | None = None) -> None:
         self.dsn = dsn
         self.schema = harden_schema or ("brain_e2e_" + uuid4().hex)
-        self.engine = create_engine(dsn)
-
         # Acquire the isolated schema as the connection search path so every
         # reflected/production query resolves to the freshly migrated tables.
-        @sa.event.listens_for(self.engine, "connect")
-        def _set_search_path(dbapi_connection, _connection_record) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute(f'SET search_path TO "{self.schema}", public')
-            cursor.close()
+        # This rides in as a *connection option* rather than a ``SET`` statement:
+        # ``SET`` is transactional, so a pooled connection that is reset on return
+        # (the SQLAlchemy default) would lose it, and the next reflection on that
+        # same connection would see an empty schema (observed 2026-09-25: the
+        # second AuthoritativeStore on one harness failed with "missing tables").
+        self.engine = create_engine(
+            dsn, connect_args={"options": f"-c search_path={self.schema},public"},
+        )
 
         self.metadata: sa.MetaData | None = None
         self.tables: dict[str, sa.Table] = {}
