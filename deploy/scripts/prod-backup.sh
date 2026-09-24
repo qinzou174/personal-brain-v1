@@ -53,19 +53,24 @@ docker exec "$DB_CONTAINER" pg_dump -U brain -d brain -Fc > "$STAGE/database.pg_
 # 2) Data root (assets, provisioned material) straight from the running volume.
 docker exec "$API_CONTAINER" tar -C /srv/brain/data -czf - . > "$STAGE/data-root.tar.gz"
 
-# 3) Mounted secrets, so the stack can be rebuilt on another machine.
-tar -C "$DATA_DIR" -czf "$STAGE/secrets.tar.gz" secrets
+# 3) Mounted secrets, read through the containers that legitimately hold them
+#    (the host copies are root-owned on purpose). Client credentials are not
+#    included: they are re-issued with `rotate-client`, never restored from a copy.
+docker exec "$API_CONTAINER" tar -C /run/secrets -czf - . > "$STAGE/api-secrets.tar.gz"
+docker exec "$DB_CONTAINER" tar -C /run/secrets -czf - . > "$STAGE/db-secrets.tar.gz"
 
 COVERED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 DB_SIZE="$(stat -c %s "$STAGE/database.pg_dump")"
-(cd "$STAGE" && sha256sum database.pg_dump data-root.tar.gz secrets.tar.gz > artifacts.sha256)
+(cd "$STAGE" && sha256sum database.pg_dump data-root.tar.gz api-secrets.tar.gz \
+  db-secrets.tar.gz > artifacts.sha256)
 cat > "$STAGE/manifest.json" <<EOF
-{"format":1,"covered_at":"$COVERED_AT","project":"$(basename "$PROJECT_DIR")","database_bytes":$DB_SIZE,"contents":["database.pg_dump","data-root.tar.gz","secrets.tar.gz"],"encryption":"openssl-aes-256-cbc-pbkdf2","passphrase_file":"$PASSPHRASE_FILE","restore":"docs/BACKUP_RESTORE.md"}
+{"format":1,"covered_at":"$COVERED_AT","project":"$(basename "$PROJECT_DIR")","database_bytes":$DB_SIZE,"contents":["database.pg_dump","data-root.tar.gz","api-secrets.tar.gz","db-secrets.tar.gz"],"encryption":"openssl-aes-256-cbc-pbkdf2","passphrase_file":"$PASSPHRASE_FILE","restore":"docs/BACKUP_RESTORE.md"}
 EOF
 (cd "$STAGE" && sha256sum manifest.json >> artifacts.sha256)
 
 tar -C "$STAGE" -cf "$STAGE/bundle.tar" \
-  database.pg_dump data-root.tar.gz secrets.tar.gz artifacts.sha256 manifest.json
+  database.pg_dump data-root.tar.gz api-secrets.tar.gz db-secrets.tar.gz \
+  artifacts.sha256 manifest.json
 
 BUNDLE="$DEST/personal-brain-prod-$STAMP.tar.age"
 openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
