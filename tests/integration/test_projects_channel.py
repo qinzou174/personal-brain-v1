@@ -339,6 +339,56 @@ def test_refresh_job_racing_a_deletion_settles_as_a_declared_skip(harness):
     assert cards == []  # an absent source projects to no card
 
 
+def test_repeating_a_statement_replays_instead_of_crashing(harness):
+    """The content dedupe key is unique per owner regardless of lifecycle: a live
+    repeat replays the record, a repeat of a deleted statement answers with the
+    tombstone — neither may surface a UniqueViolation (HTTP 500)."""
+    from personal_brain_server.admin import set_review_access
+
+    service, token, provisioned = _service(harness)
+    first = service.create_project(
+        credential=token, name="去重验证-甲", purpose="dedupe replay",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    decision = service.record_decision(
+        credential=token, project_id=first, statement="同一句话只说一次",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    repeated = service.record_decision(
+        credential=token, project_id=first, statement="同一句话只说一次",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    assert repeated["status"] == "duplicate" and repeated["deduplicated"] is True
+    assert repeated["decision_id"] == decision["decision_id"]
+
+    set_review_access(
+        harness.factory, harness.tables, client_id=provisioned["client_id"],
+        scope="projects", access="write",
+        confirmed_client_id=provisioned["client_id"], confirmed_scope="projects",
+    )
+    plan = service.create_deletion_plan(
+        credential=token, targets=[["project", first]], dependents={},
+        requested_scope="projects", idempotency_key=uuid4(),
+    )
+    service.resolve_review_item(
+        credential=token, item_id=plan["review_item_id"], expected_version=1,
+        decision="approved", idempotency_key=uuid4(),
+    )
+
+    second = service.create_project(
+        credential=token, name="去重验证-乙", purpose="dedupe versus tombstone",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    replay = service.record_decision(
+        credential=token, project_id=second, statement="同一句话只说一次",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    assert replay["status"] == "deleted" and replay["persistence"] == "tombstone"
+    assert replay["decision_id"] == decision["decision_id"]
+    rows = table_rows(harness, "decisions", id=UUID(decision["decision_id"]))
+    assert len(rows) == 1 and rows[0]["lifecycle_state"] == "deleted"
+
+
 def _project_rows(harness, project_id):
     import sqlalchemy as sa
 

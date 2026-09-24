@@ -1185,12 +1185,24 @@ class AuthoritativeStore:
         # idempotently instead of surfacing a UniqueViolation as HTTP 500.
         table = self.tables[table_name]
         with self._session_factory() as session:
-            existing = session.execute(sa.select(table.c.id, table.c.project_id).where(
+            existing = session.execute(sa.select(
+                table.c.id, table.c.project_id, table.c.lifecycle_state,
+            ).where(
                 table.c.owner_id == self._db_id(table, "owner_id", self.owner_id),
                 table.c.deduplication_key == dedupe,
-                table.c.lifecycle_state == "active",
             )).first()
         if existing is not None:
+            if existing.lifecycle_state != "active":
+                # The same statement was recorded before and has since been
+                # deleted (its project was removed): deleted content is never
+                # recreated, and the unique key would reject a fresh insert
+                # anyway — answer with the tombstone instead of a 500.
+                return {
+                    "status": "deleted", "persistence": "tombstone", "deduplicated": True,
+                    f"{kind}_id": str(existing.id),
+                    "existing_project_id": str(existing.project_id),
+                    "operation_id": str(idempotency_key),
+                }
             return {
                 "status": "duplicate", "persistence": "canonical_committed",
                 "deduplicated": True, f"{kind}_id": str(existing.id),
