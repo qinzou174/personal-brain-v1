@@ -157,3 +157,147 @@ def test_exact_project_access_requires_confirmation_and_is_revocable(tmp_path):
         actions = set(session.scalars(sa.select(metadata.tables["audit_events"].c.action)))
     assert {"provision_client", "grant_project_access", "revoke_project_access"} <= actions
     engine.dispose()
+
+
+def test_rebuild_index_enqueues_one_job_per_record_and_is_repeatable():
+    """The rebuild entry must actually press: one durable job per canonical record."""
+    from personal_brain_server.admin import rebuild_index
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    owner_id = uuid4()
+    sa.Table("owners", metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True))
+    sa.Table(
+        "raw_inputs", metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("owner_id", sa.Uuid(as_uuid=True), nullable=False),
+        sa.Column("lifecycle_state", sa.String, nullable=False), sa.Column("content_text", sa.Text),
+    )
+    sa.Table(
+        "todos", metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("owner_id", sa.Uuid(as_uuid=True), nullable=False),
+        sa.Column("lifecycle_state", sa.String, nullable=False),
+    )
+    sa.Table(
+        "self_claims", metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("owner_id", sa.Uuid(as_uuid=True), nullable=False),
+        sa.Column("lifecycle_state", sa.String, nullable=False),
+    )
+    for name in ("projects", "project_tasks", "checkpoints", "workspace_observations"):
+        sa.Table(name, metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+                 sa.Column("owner_id", sa.Uuid(as_uuid=True), nullable=False))
+    sa.Table(
+        "jobs", metadata, sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+        sa.Column("owner_id", sa.Uuid(as_uuid=True), nullable=False),
+        sa.Column("client_id", sa.Uuid(as_uuid=True)), sa.Column("job_type", sa.String, nullable=False),
+        sa.Column("payload_ref", sa.Text, nullable=False),
+        sa.Column("idempotency_key", sa.Uuid(as_uuid=True)), sa.Column("state", sa.String, nullable=False),
+        sa.Column("priority", sa.Integer, nullable=False), sa.Column("attempts", sa.Integer, nullable=False),
+        sa.Column("max_attempts", sa.Integer, nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("claim_token", sa.Integer, nullable=False),
+    )
+    metadata.create_all(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    kept = uuid4()
+    with factory.begin() as session:
+        session.execute(metadata.tables["owners"].insert().values(id=owner_id))
+        session.execute(metadata.tables["raw_inputs"].insert().values(
+            id=kept, owner_id=owner_id, lifecycle_state="active", content_text="可检索的笔记",
+        ))
+        session.execute(metadata.tables["raw_inputs"].insert().values(
+            id=uuid4(), owner_id=owner_id, lifecycle_state="deleted", content_text="已删除的笔记",
+        ))
+        session.execute(metadata.tables["todos"].insert().values(
+            id=uuid4(), owner_id=owner_id, lifecycle_state="active",
+        ))
+        session.execute(metadata.tables["self_claims"].insert().values(
+            id=uuid4(), owner_id=owner_id, lifecycle_state="superseded",
+        ))
+        session.execute(metadata.tables["projects"].insert().values(id=uuid4(), owner_id=owner_id))
+
+    first = rebuild_index(factory, metadata.tables)
+
+    assert first == {"scanned": 3, "enqueued": 3, "skipped_active": 0}
+    with factory() as session:
+        rows = [dict(row) for row in session.execute(sa.select(metadata.tables["jobs"])).mappings().all()]
+    assert {row["job_type"] for row in rows} == {"rebuild_index"}
+    refs = {row["payload_ref"] for row in rows}
+    assert f"raw_input:{kept}" in refs
+    assert sum(1 for ref in refs if ref.startswith("todo:")) == 1
+    assert sum(1 for ref in refs if ref.startswith("project:")) == 1
+    assert not any("deleted" in ref for ref in refs)
+    assert all(row["state"] == "queued" for row in rows)
+
+    # Pressing it twice never double-queues the same record.
+    second = rebuild_index(factory, metadata.tables)
+    assert second == {"scanned": 3, "enqueued": 0, "skipped_active": 3}
+    engine.dispose()
+
+
+def test_review_access_grant_unlocks_the_governance_gate_on_a_content_scope(tmp_path):
+    """D1: governance tools authorize the data scope, so the gate needs a switch."""
+    from personal_brain_infra.security.authority import PersistedAuthority
+    from personal_brain_server.admin import provision_client, set_review_access
+
+    engine, factory, metadata = _database()
+    credential_file = tmp_path / "zafiro.credential"
+    provisioned = provision_client(
+        factory, metadata.tables, display_name="Zafiro", client_type="mobile",
+        credential_file=credential_file,
+    )
+    token = credential_file.read_text(encoding="utf-8").strip()
+    authority = PersistedAuthority(factory, metadata.tables)
+    context = authority.authenticate(token)
+
+    # The initial least-privilege profile cannot govern knowledge data: the call
+    # is denied before the high-risk confirmation gate is ever reached.
+    with pytest.raises(BrainError) as denied:
+        authority.authorize(context, tool="review.write", scope="knowledge",
+                            sensitivity="private", risk="high_risk_deletion")
+    assert denied.value.code == "SCOPE_DENIED"
+
+    with pytest.raises(BrainError) as unconfirmed:
+        set_review_access(
+            factory, metadata.tables, client_id=provisioned["client_id"], scope="knowledge",
+            access="write", confirmed_client_id=provisioned["client_id"], confirmed_scope="self",
+        )
+    assert unconfirmed.value.code == "CONFIRMATION_REQUIRED"
+
+    set_review_access(
+        factory, metadata.tables, client_id=provisioned["client_id"], scope="knowledge",
+        access="write", confirmed_client_id=provisioned["client_id"], confirmed_scope="knowledge",
+    )
+
+    context = authority.authenticate(token)
+    # create_review_item's ordinary-risk path now authorizes on the content scope…
+    assert authority.authorize(context, tool="review.write", scope="knowledge", sensitivity="private")
+    # …and create_deletion_plan reaches the ER-06 confirmation gate instead of SCOPE_DENIED.
+    with pytest.raises(BrainError) as gated:
+        authority.authorize(context, tool="review.write", scope="knowledge",
+                            sensitivity="private", risk="high_risk_deletion")
+    assert gated.value.code == "CONFIRMATION_REQUIRED"
+
+    from personal_brain_server.api.authorized_tools import AuthorizedToolService
+
+    service = AuthorizedToolService(
+        authority, lambda **kwargs: pytest.fail("store must not be reached before confirmation"),
+    )
+    with pytest.raises(BrainError) as service_gate:
+        service.create_deletion_plan(
+            credential=token, targets=[["raw_input", str(uuid4())]], dependents={},
+            requested_scope="knowledge", idempotency_key=uuid4(),
+        )
+    assert service_gate.value.code == "CONFIRMATION_REQUIRED"
+
+    set_review_access(
+        factory, metadata.tables, client_id=provisioned["client_id"], scope="knowledge",
+        access="none", confirmed_client_id=provisioned["client_id"], confirmed_scope="knowledge",
+    )
+    with pytest.raises(BrainError) as revoked:
+        authority.authorize(authority.authenticate(token), tool="review.write", scope="knowledge",
+                            sensitivity="private", risk="high_risk_deletion")
+    assert revoked.value.code == "SCOPE_DENIED"
+    with factory() as session:
+        actions = set(session.scalars(sa.select(metadata.tables["audit_events"].c.action)))
+    assert {"grant_review_access", "revoke_review_access"} <= actions
+    engine.dispose()

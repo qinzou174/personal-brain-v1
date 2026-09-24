@@ -9,6 +9,7 @@ bounded, retryable failure.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -139,6 +140,38 @@ def test_extract_replays_existing_derivation_without_second_call(harness):
     assert len(provider.calls) == 1
     assert len(table_rows(harness, "derived_contents", owner_id=owner_id)) == 1
     assert len(table_rows(harness, "self_claims", owner_id=owner_id)) == 1
+
+
+def test_extract_merges_a_duplicate_candidate_instead_of_creating_a_second_row(harness):
+    """D2: the same claim must not become a second candidate row."""
+    from activation_support import insert_evidence, insert_self_claim
+
+    owner_id, client_id = seed_owner(harness)
+    existing_source = insert_raw_input(harness, owner_id, client_id,
+                                       text="之前已经记过一条相似偏好")
+    existing_id = insert_self_claim(
+        harness, owner_id, claim="用户喜欢喝咖啡", source_id=existing_source,
+        category="preference",
+    )
+    insert_evidence(harness, owner_id, claim_id=existing_id, source_id=existing_source,
+                    observed_at=datetime.now(timezone.utc))
+    raw_id = insert_raw_input(harness, owner_id, client_id, text="最近喜欢喝咖啡，每天早上一杯拿铁")
+    handlers = _handlers(harness, gateway=gateway_for(constant_provider(_EXTRACTION_JSON)))
+
+    result = handlers["extract_raw_input"](_extract_job(owner_id, raw_id), FakeContext())
+
+    assert result["extracted"] == 0 and result["merged"] == 1
+    claims = table_rows(harness, "self_claims", owner_id=owner_id)
+    assert len(claims) == 1 and claims[0]["id"] == existing_id
+    assert any(event["type"] == "duplicate_candidate_merged"
+               for event in claims[0]["correction_events"])
+    evidence_rows = table_rows(harness, "evidence", owner_id=owner_id)
+    assert {row["target_id"] for row in evidence_rows} == {existing_id}
+    assert {str(row["source_id"]) for row in evidence_rows} == {
+        str(existing_source), str(raw_id),
+    }
+    # No second index job: the surviving claim carries the merged evidence.
+    assert table_rows(harness, "jobs", job_type="index_self_claim", owner_id=owner_id) == []
 
 
 def test_extract_respects_daily_quota_and_reports_the_reason(harness):

@@ -78,6 +78,7 @@ class AuthoritativeStore:
         pre_commit: Callable[[], None] | None = None,
         side_effect: Callable[[Session, UUID, UUID, datetime], None] | None = None,
         existing_target_id: UUID | None = None,
+        dedupe_digest: str | None = None,
     ) -> dict[str, Any]:
         if target_table is not None and target_table not in self.tables:
             raise RuntimeError(f"authoritative schema missing table: {target_table}")
@@ -117,13 +118,57 @@ class AuthoritativeStore:
                 outcome_refs=[], correlation_id=self._db_id(intake, "correlation_id", correlation_id),
                 error_code=None,
             ))
+            content_digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            if dedupe_digest is not None:
+                # D3: the client explicitly asks for content-level duplicate
+                # detection (a forked/regenerated conversation re-sends the same
+                # entry). The claimed hash must equal the server's own digest, so
+                # a client bug can never fold different content into one record.
+                if dedupe_digest != content_digest:
+                    raise BrainError("VALIDATION_FAILED")
+                existing = session.execute(sa.select(
+                    raw.c.id, raw.c.intake_request_id,
+                ).where(
+                    raw.c.owner_id == self._db_id(raw, "owner_id", self.owner_id),
+                    raw.c.content_hash == content_digest,
+                    raw.c.lifecycle_state == "active",
+                ).limit(1)).mappings().first()
+                if existing is not None:
+                    # Native UUID, 32-hex and string-backed schemas all appear in
+                    # practice, so normalize through one explicit boundary.
+                    existing_id = UUID(str(existing["id"]))
+                    outcome = {
+                        "status": "duplicate", "persistence": "already_committed",
+                        result_key: self._external_id(existing_id),
+                        "source_id": self._external_id(existing_id),
+                        "operation_id": self._external_id(existing["intake_request_id"]),
+                        "duplicate_of": self._external_id(existing_id),
+                    }
+                    session.execute(
+                        intake.update().where(intake.c.id == self._db_id(intake, "id", intake_id))
+                        .values(state="completed", outcome_refs=[str(existing_id)])
+                    )
+                    session.execute(audit.insert().values(
+                        id=self._db_id(audit, "id", audit_id),
+                        owner_id=self._db_id(audit, "owner_id", self.owner_id),
+                        client_id=self._db_id(audit, "client_id", self.client_id),
+                        correlation_id=self._db_id(audit, "correlation_id", correlation_id),
+                        action=operation, tool=tool, effective_scope=requested_scope,
+                        target_category=target_category,
+                        target_id=self._db_id(audit, "target_id", existing_id),
+                        outcome="duplicate", error_code=None, duration_ms=0, occurred_at=now,
+                        risk="ordinary", authorization_decision="allow",
+                    ))
+                    complete_claim(session, idempotency, claim_id=claim.id, outcome=outcome)
+                    uow.commit()
+                    return outcome
             session.execute(raw.insert().values(
                 id=self._db_id(raw, "id", source_id),
                 owner_id=self._db_id(raw, "owner_id", self.owner_id),
                 intake_request_id=self._db_id(raw, "intake_request_id", intake_id),
                 client_id=self._db_id(raw, "client_id", self.client_id),
                 content_text=source_text, asset_ref=None,
-                content_hash=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                content_hash=content_digest,
                 original_at=now, original_timezone="UTC", source_channel="api",
                 language="zh-CN", retention_policy="canonical", sensitivity="normal",
                 information_class="explicit_user_statement", canonicality="canonical",
@@ -188,14 +233,21 @@ class AuthoritativeStore:
 
     def save_note(
         self, *, content: str, requested_scope: str, idempotency_key: UUID,
-        pre_commit: Callable[[], None] | None = None,
+        pre_commit: Callable[[], None] | None = None, content_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Two intake stages: retrieval projection (index) plus LLM extraction."""
+        """Two intake stages: retrieval projection (index) plus LLM extraction.
+
+        ``content_hash`` (optional) opts into content-level duplicate detection:
+        a forked conversation that re-sends an identical entry returns the record
+        that already exists instead of a second canonical row (status
+        ``duplicate``). The claimed hash must match the server's own digest.
+        """
         return self._commit_record(
             operation="save_note", idempotency_key=idempotency_key, source_text=content,
             requested_scope=requested_scope, tool="knowledge.write", target_category="raw_input",
             target_table=None, target_values=None, result_key="record_id",
             job_type="index_raw_input", extra_jobs=("extract_raw_input",), pre_commit=pre_commit,
+            dedupe_digest=content_hash.strip().lower() if content_hash else None,
         )
 
     def add_todo(
@@ -678,6 +730,7 @@ class AuthoritativeStore:
                 state=decision, resolver_id=self._db_id(items, "resolver_id", self.client_id),
                 resolved_at=now, updated_at=now,
             ))
+            merged_claims: list[str] = []
             if decision == "approved" and row["item_type"] == "profile_confirmation":
                 claims_table = self.tables["self_claims"]
                 for subject in row["subject_refs"]:
@@ -700,6 +753,15 @@ class AuthoritativeStore:
                 requested_scope = str(row["proposal"].get("scope") or "review")
                 self._execute_approved_deletion_plan(
                     session, plan_id=plan_id, requested_scope=requested_scope, now=now,
+                )
+            elif decision == "approved" and row["item_type"] == "merge_candidate":
+                # D2: an owner-approved duplicate merge is the claim merge/park
+                # interface — evidence moves, duplicates are superseded with a
+                # correction event, nothing is deleted.
+                merged_claims = self._merge_claims(
+                    session, subject_refs=list(row["subject_refs"] or []),
+                    proposal=dict(row["proposal"] or {}),
+                    review_item_id=row["id"], now=now,
                 )
             elif decision == "rejected" and row["item_type"] == "deletion_confirmation" and "deletion_plans" in self.tables:
                 try:
@@ -732,11 +794,90 @@ class AuthoritativeStore:
                 "status": "completed", "persistence": "canonical_committed",
                 "review_item_id": str(item_id), "decision": decision,
             }
+            if merged_claims:
+                outcome["merged_claims"] = merged_claims
             complete_claim(session, claims, claim_id=claim.id, outcome=outcome)
             if pre_commit is not None:
                 pre_commit()
             uow.commit()
         return outcome
+
+    def _merge_claims(
+        self, session: Session, *, subject_refs: list[Any], proposal: dict[str, Any],
+        review_item_id: Any, now: datetime,
+    ) -> list[str]:
+        """Merge owner-approved duplicate claims inside the resolving transaction.
+
+        Mirrors the worker's duplicate rule: the surviving row keeps the claim and
+        absorbs the duplicate's evidence; every duplicate is superseded (never
+        deleted) with a correction event, and its retrieval card stops being
+        served. The caller persists the audit and the review outcome.
+        """
+        claims_table = self.tables["self_claims"]
+        evidence_table = self.tables["evidence"]
+        index_table = self.tables.get("search_index_entries")
+        refs: list[UUID] = []
+        for ref in subject_refs:
+            try:
+                refs.append(UUID(str(ref)))
+            except (ValueError, TypeError):
+                continue
+        if len(refs) < 2:
+            raise BrainError("VALIDATION_FAILED")
+        rows = session.execute(sa.select(claims_table).where(
+            claims_table.c.id.in_([self._db_id(claims_table, "id", ref) for ref in refs]),
+            claims_table.c.owner_id == self._db_id(claims_table, "owner_id", self.owner_id),
+            claims_table.c.lifecycle_state.in_(("candidate", "active", "historical")),
+        )).mappings().all()
+        if len(rows) < 2:
+            return []
+        survivor_id = None
+        try:
+            survivor_id = UUID(str(proposal.get("survivor_id")))
+        except (ValueError, TypeError):
+            survivor_id = None
+        if survivor_id not in {row["id"] for row in rows}:
+            survivor_id = sorted(rows, key=lambda row: (row["created_at"], str(row["id"])))[0]["id"]
+        merged_ids = [row["id"] for row in rows if row["id"] != survivor_id]
+        for merged_id in merged_ids:
+            session.execute(evidence_table.update().where(
+                evidence_table.c.owner_id == self._db_id(evidence_table, "owner_id", self.owner_id),
+                evidence_table.c.target_type == "self_claim",
+                evidence_table.c.target_id == self._db_id(evidence_table, "target_id", merged_id),
+            ).values(
+                target_id=self._db_id(evidence_table, "target_id", survivor_id),
+                version=evidence_table.c.version + 1, updated_at=now,
+            ))
+            duplicate = session.execute(sa.select(claims_table).where(
+                claims_table.c.id == self._db_id(claims_table, "id", merged_id),
+            )).mappings().one()
+            events = [dict(event) for event in (duplicate["correction_events"] or [])]
+            events.append({"type": "superseded_by_duplicate_merge", "at": now.isoformat(),
+                           "survivor_id": str(survivor_id),
+                           "rule": "owner_approved_merge_candidate"})
+            session.execute(claims_table.update().where(
+                claims_table.c.id == self._db_id(claims_table, "id", merged_id),
+            ).values(
+                lifecycle_state="superseded", valid_to=now, correction_events=events, updated_at=now,
+            ))
+            if index_table is not None:
+                session.execute(index_table.delete().where(
+                    index_table.c.owner_id == self._db_id(index_table, "owner_id", self.owner_id),
+                    index_table.c.target_type == "self_claim",
+                    index_table.c.target_id == self._db_id(index_table, "target_id", merged_id),
+                ))
+        survivor = session.execute(sa.select(claims_table).where(
+            claims_table.c.id == self._db_id(claims_table, "id", survivor_id),
+        )).mappings().one()
+        events = [dict(event) for event in (survivor["correction_events"] or [])]
+        events.append({"type": "merged_duplicates", "at": now.isoformat(),
+                       "merged_claim_ids": [str(merged_id) for merged_id in merged_ids],
+                       "review_item_id": str(review_item_id),
+                       "rule": "owner_approved_merge_candidate"})
+        session.execute(claims_table.update().where(
+            claims_table.c.id == self._db_id(claims_table, "id", survivor_id),
+        ).values(correction_events=events, updated_at=now))
+        return [str(merged_id) for merged_id in merged_ids]
 
     def get_operation_status(self, operation_id: UUID) -> dict[str, Any]:
         intake = self.tables["intake_requests"]
@@ -816,7 +957,14 @@ class AuthoritativeStore:
 
     def get_self_context(self, *, categories: list[str] | None = None) -> dict[str, Any]:
         claims = self.tables["self_claims"]
-        predicates = [claims.c.owner_id == self._db_id(claims, "owner_id", self.owner_id)]
+        # D2: the profile view shows what the brain currently holds (candidate
+        # proposals plus active beliefs). Superseded duplicates, expired and
+        # historical rows stay in the database for audit but are not re-stated
+        # as if they were separate standing claims.
+        predicates = [
+            claims.c.owner_id == self._db_id(claims, "owner_id", self.owner_id),
+            claims.c.lifecycle_state.in_(("candidate", "active")),
+        ]
         if categories:
             predicates.append(claims.c.category.in_(categories))
         with self._session_factory() as session:

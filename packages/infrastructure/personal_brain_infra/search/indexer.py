@@ -37,11 +37,28 @@ class SearchIndexer:
         repository = PostgresSearchRepository(
             self._factory, self._tables["search_index_entries"], owner_id=owner_id,
         )
+        warnings: list[str] = []
         if self._embedder is not None:
-            entry["embedding"] = self._embedder.embed(entry["text"])
-            entry["vector_model_version"] = self._embedder.model_version
-        entry_id = repository.index(**entry)
-        return {"search_entry_id": entry_id, "target_ref": f"{target_type}:{target_id}", "indexed": True}
+            try:
+                entry["embedding"] = self._embedder.embed(entry["text"])
+            except BrainError as error:
+                # Decision (b), 2026-09-25: secret-like content keeps its canonical
+                # raw text locally (*never* sent to an embedding provider), so the
+                # card degrades to keyword-only instead of dead-lettering the job.
+                # The skip is declared on the card so retrieval stays honest.
+                if error.code != "SECRET_REJECTED":
+                    raise
+                warnings.append("secret_like_semantic_skipped")
+            else:
+                entry["vector_model_version"] = self._embedder.model_version
+        entry_id = repository.index(**entry, warnings=warnings)
+        result: dict[str, Any] = {
+            "search_entry_id": entry_id, "target_ref": f"{target_type}:{target_id}",
+            "indexed": True,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     def _raw_input(self, owner_id: UUID, target_id: UUID) -> dict[str, Any]:
         raw, intake = self._tables["raw_inputs"], self._tables["intake_requests"]

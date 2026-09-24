@@ -30,10 +30,42 @@ class WorkerLoop:
 
 
 class JobExecutionError(Exception):
-    def __init__(self, code: str, *, retryable: bool) -> None:
+    def __init__(self, code: str, *, retryable: bool, summary: str | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.retryable = retryable
+        # Value-free, owner-readable reason (FR-070/FR-073: no payload content).
+        self.summary = summary
+
+
+# One readable sentence per failure code so a dead letter explains itself in the
+# job row and in the owner's inbox notification instead of a bare code.
+FAILURE_SUMMARIES: dict[str, str] = {
+    "NOT_FOUND": "引用的记录已不存在（可能已被删除）",
+    "SECRET_REJECTED": "内容疑似包含凭据，按安全规则拒绝处理",
+    "VALIDATION_FAILED": "请求字段不合法，作业无法执行",
+    "TOOL_DENIED": "该客户端没有执行此作业所需的能力",
+    "SCOPE_DENIED": "权限不足，作业被拒绝",
+    "PERMISSION_DENIED": "权限不足，作业被拒绝",
+    "SENSITIVITY_DENIED": "记录敏感级别超出该客户端授权上限",
+    "CONFIRMATION_REQUIRED": "该操作需要主人确认后才能执行",
+    "CONFIRMATION_EXPIRED": "确认已过期，需要重新发起",
+    "AUTH_INVALID": "客户端凭据无效",
+    "CLIENT_REVOKED": "客户端已被撤销",
+    "VERSION_CONFLICT": "记录在作业执行期间已被修改，版本校验失败",
+    "DEPENDENCY_CONFLICT": "依赖的数据状态冲突，可在下次重试中恢复",
+    "BRAIN_UNAVAILABLE": "依赖服务暂不可用（模型或数据库）",
+    "PAYLOAD_TOO_LARGE": "内容超出大小上限",
+    "WORKSPACE_BOUNDARY_VIOLATION": "工作区根标识校验失败",
+    "ARCHIVE_LIMIT_EXCEEDED": "归档数量超出上限",
+}
+
+
+def describe_failure(code: str | None) -> str:
+    """A readable, value-free explanation for a failure code."""
+    if not code:
+        return "未记录失败原因"
+    return FAILURE_SUMMARIES.get(code, f"{code}（未登记的原因，详情见 worker 日志）")
 
 
 @dataclass(frozen=True)
@@ -114,8 +146,11 @@ class DurableJobPoller:
                 self._recheck(job, "before_commit")
             except JobExecutionError as error:
                 self._settle_failure(job, error)
-            except Exception:
-                self._settle_failure(job, JobExecutionError("BRAIN_UNAVAILABLE", retryable=True))
+            except Exception as error:
+                self._settle_failure(job, JobExecutionError(
+                    "BRAIN_UNAVAILABLE", retryable=True,
+                    summary=f"未预期的内部错误（{type(error).__name__}），详情见 worker 日志",
+                ))
             else:
                 with self._factory.begin() as session:
                     complete_job(
@@ -128,9 +163,10 @@ class DurableJobPoller:
         return len(claimed)
 
     def _settle_failure(self, job: dict[str, Any], error: JobExecutionError) -> None:
+        summary = error.summary or describe_failure(error.code)
         with self._factory.begin() as session:
             fail_job(
                 session, self._jobs, job_id=job["id"], claim_token=job["claim_token"],
-                error_code=error.code, error_summary="job execution rejected or failed",
+                error_code=error.code, error_summary=summary[:512],
                 policy=self._policy, now=datetime.now(timezone.utc), retryable=error.retryable,
             )

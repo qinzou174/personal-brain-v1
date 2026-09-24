@@ -86,7 +86,7 @@ class AuthorizedToolService:
 
     def save_note(
         self, *, credential: str, content: str, requested_scope: str,
-        idempotency_key: UUID,
+        idempotency_key: UUID, content_hash: str | None = None,
     ) -> dict[str, Any]:
         if not content or not content.strip():
             raise BrainError("VALIDATION_FAILED")
@@ -97,6 +97,7 @@ class AuthorizedToolService:
         store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
         result = store.save_note(
             content=content, requested_scope=requested_scope, idempotency_key=idempotency_key,
+            content_hash=content_hash,
             pre_commit=lambda: self._authority.authorize(
                 context, tool="knowledge.write", scope=requested_scope, sensitivity="private",
             ),

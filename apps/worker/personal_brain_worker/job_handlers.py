@@ -13,6 +13,7 @@ from personal_brain_infra.search.indexer import SearchIndexer
 from personal_brain_infra.storage.base import StorageBackend
 from personal_brain_domain.common.errors import BrainError
 from personal_brain_domain.security.secret_filter import detect_secret
+from personal_brain_worker.claim_dedupe import make_dedupe_handler
 from personal_brain_worker.digest import make_digest_handler
 from personal_brain_worker.evolution import (
     make_conflict_handler, make_promote_handler, make_retention_handler,
@@ -185,6 +186,18 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
             failed_jobs, stale_modules = int(failed_jobs or 0), int(stale_modules or 0)
             if failed_jobs:
                 notifications, jobs = tables["notifications"], tables["jobs"]
+                # Why they failed, in owner-readable words (value-free: codes and
+                # sentences only, never payload content).
+                from personal_brain_worker.runtime import describe_failure
+
+                reason_rows = session.execute(sa.select(
+                    jobs.c.error_code, sa.func.count(),
+                ).where(
+                    jobs.c.owner_id == owner_id, jobs.c.state == "dead_letter",
+                ).group_by(jobs.c.error_code)).all()
+                reasons = "；".join(
+                    f"{describe_failure(code)}×{int(count)}" for code, count in reason_rows[:3]
+                )[:300]
                 decision = evaluate_trigger(trigger_type="brain_health_failure", risk="high")
                 dedupe_key = f"brain_health_failure:{owner_id}:{moment:%Y-%m-%d}"
                 last_sent = session.scalar(sa.select(sa.func.max(notifications.c.created_at)).where(
@@ -201,7 +214,8 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
                         source_object_id=None, risk="high", priority=decision.priority,
                         dedupe_key=dedupe_key, cooldown_group="brain_health", channel="inbox",
                         state="queued",
-                        reason=f"failed_jobs={failed_jobs} stale_modules={stale_modules}",
+                        reason=(f"failed_jobs={failed_jobs} stale_modules={stale_modules}"
+                                + (f"；原因：{reasons}" if reasons else "")),
                         delivered_at=None, acknowledged_at=None,
                     ))
                     session.execute(jobs.insert().values(
@@ -267,6 +281,7 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
         "promote_candidates": make_promote_handler(session_factory, tables),
         "retention_sweep": make_retention_handler(session_factory, tables),
         "conflict_scan": make_conflict_handler(session_factory, tables),
+        "dedupe_claims": make_dedupe_handler(session_factory, tables),
         "daily_digest": digest,
     }
 

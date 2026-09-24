@@ -29,8 +29,10 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 import sqlalchemy as sa
 
 from personal_brain_domain.common.errors import BrainError
+from personal_brain_domain.security.secret_filter import detect_secret
 from personal_brain_infra.models.gateway import ModelGateway, ProviderCallBudget
 from personal_brain_infra.storage.base import StorageBackend
+from personal_brain_worker.claim_dedupe import find_duplicate
 from personal_brain_worker.llm_budget import quota_exceeded
 from personal_brain_worker.runtime import JobExecutionError
 
@@ -170,6 +172,14 @@ def make_extract_handler(
             )).scalar()
         if row is None or not row["content_text"]:
             raise JobExecutionError("NOT_FOUND", retryable=False)
+        # Decision (b), 2026-09-25: a secret-like note keeps its canonical raw text
+        # locally but is never sent to a model provider. The skip is declared (no
+        # dead letter, no retry loop) and no derived content is fabricated.
+        if detect_secret(
+            filename="extraction-input.txt", content_type="text/plain",
+            content=row["content_text"],
+        ).matched:
+            return {"extracted": 0, "dropped": 0, "skipped": "secret_like_content"}
         if existing is not None:
             return {"extracted": 0, "dropped": 0, "skipped": "already_extracted",
                     "derived_id": str(existing)}
@@ -194,6 +204,10 @@ def make_extract_handler(
                 sensitivity=row["sensitivity"], budget=ProviderCallBudget(max_calls=1),
             )
         except BrainError as error:
+            if error.code == "SECRET_REJECTED":
+                # Defence in depth: the gateway re-checks the encoded request, so
+                # a match here is still a declared skip, never a dead letter.
+                return {"extracted": 0, "dropped": 0, "skipped": "secret_like_content"}
             raise JobExecutionError(
                 error.code, retryable=error.code in {"BRAIN_UNAVAILABLE", "DEPENDENCY_CONFLICT"},
             ) from error
@@ -220,6 +234,17 @@ def make_extract_handler(
 
         derived_id = uuid4()
         claim_context = f"{row['source_channel']}:{row['requested_scope']}"[:256]
+        # D2: load the owner's live claims so a duplicate candidate never becomes a
+        # second row; its evidence attaches to the claim the owner already has.
+        pool: list[dict[str, Any]] = []
+        if parsed["candidates"]:
+            with session_factory() as session:
+                pool = [dict(claim_row) for claim_row in session.execute(sa.select(claims).where(
+                    claims.c.owner_id == owner_id,
+                    claims.c.category.in_({candidate["category"] for candidate in parsed["candidates"]}),
+                    claims.c.lifecycle_state.in_(("candidate", "active", "historical")),
+                )).mappings().all()]
+        merged = 0
         with session_factory.begin() as session:
             session.execute(derived.insert().values(
                 id=derived_id, owner_id=owner_id, target_type="raw_input", target_id=raw_id,
@@ -239,6 +264,37 @@ def make_extract_handler(
                 contribution_weight=1, generator_version=EXTRACTION_VERSION,
             ))
             for candidate in parsed["candidates"]:
+                match = find_duplicate(
+                    candidate["claim"],
+                    [claim_row for claim_row in pool
+                     if claim_row["category"] == candidate["category"]],
+                )
+                if match is not None and match[1] == "duplicate":
+                    existing_row = match[0]
+                    session.execute(evidence.insert().values(
+                        id=uuid4(), owner_id=owner_id, target_type="self_claim",
+                        target_id=existing_row["id"], source_type="raw_input", source_id=raw_id,
+                        stance="supports", source_trust="ai_extraction", observed_at=moment,
+                        context=claim_context, contribution=Decimal("0.3"), lifecycle_state="active",
+                    ))
+                    session.execute(edges.insert().values(
+                        id=uuid4(), owner_id=owner_id, source_type="raw_input", source_id=raw_id,
+                        derived_type="self_claim", derived_id=existing_row["id"], role="inferred_from",
+                        contribution_weight=Decimal("0.3"), generator_version=EXTRACTION_VERSION,
+                    ))
+                    summary = list(existing_row.get("evidence_summary") or [])
+                    summary.append({"raw_input": str(raw_id), "derived_id": str(derived_id),
+                                    "quote": candidate["quote"], "merged_by": "dedupe_v1"})
+                    events = [dict(event) for event in (existing_row.get("correction_events") or [])]
+                    events.append({"type": "duplicate_candidate_merged", "at": moment.isoformat(),
+                                   "raw_input": str(raw_id),
+                                   "rule": "normalized_or_token_jaccard>=0.75"})
+                    session.execute(claims.update().where(
+                        claims.c.id == existing_row["id"],
+                    ).values(evidence_summary=summary, correction_events=events, updated_at=moment))
+                    existing_row["evidence_summary"] = summary
+                    merged += 1
+                    continue
                 claim_id = uuid4()
                 session.execute(claims.insert().values(
                     id=claim_id, owner_id=owner_id, category=candidate["category"],
@@ -270,8 +326,12 @@ def make_extract_handler(
                     state="queued", priority=0, attempts=0, max_attempts=5,
                     available_at=moment, claim_token=0,
                 ))
+                # Later candidates in the same output must see this row too.
+                pool.append({"id": claim_id, "category": candidate["category"],
+                             "claim": candidate["claim"], "evidence_summary": [],
+                             "correction_events": []})
         context.progress(100, "extraction committed")
-        return {"extracted": len(parsed["candidates"]), "dropped": parsed["dropped"],
-                "derived_id": str(derived_id)}
+        return {"extracted": len(parsed["candidates"]) - merged, "merged": merged,
+                "dropped": parsed["dropped"], "derived_id": str(derived_id)}
 
     return handler

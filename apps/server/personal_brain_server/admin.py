@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 
@@ -40,6 +40,13 @@ _TOOL_SCOPES: dict[str, tuple[str, ...]] = {
     "review.write": ("review",), "review.read": ("review",),
     "operation.read": ("operations",), "project.write": ("projects",),
 }
+# D1, 2026-09-25: governance tools (``create_deletion_plan`` /
+# ``create_review_item``) authorize the *data* scope that owns the targets, so
+# ``create_deletion_plan(requested_scope="knowledge")`` was denied before it
+# could ever reach the high-risk confirmation gate: the initial profile only
+# grants ``review.write``/``review.read`` on the ``review`` scope. These scopes
+# are the explicit, revocable switches that unlock governance per content scope.
+_GOVERNANCE_SCOPES = ("knowledge", "finance", "todo", "self", "asset", "projects", "review")
 
 
 def _uuid(value: str | UUID) -> UUID:
@@ -268,6 +275,123 @@ def set_project_access(
                action=action, scope=scope,
                target_category="project", target_id=project_uuid)
     return {"client_id": str(client_uuid), "project_id": str(project_uuid), "access": access}
+
+
+def set_review_access(
+    factory: Any, tables: Mapping[str, sa.Table], *, client_id: str | UUID,
+    scope: str, access: str, confirmed_client_id: str | UUID, confirmed_scope: str,
+) -> dict[str, str]:
+    """Grant or revoke governance (review.read/review.write) on one content scope.
+
+    Mirrors ``set_project_access``: the same double confirmation, an auditable
+    grant row, and a permission-epoch bump so no stale epoch keeps governing.
+    Revocation closes the grant via ``effective_to`` instead of rewriting history.
+    """
+    client_uuid = _uuid(client_id)
+    normalized = scope.strip()
+    if _uuid(confirmed_client_id) != client_uuid or confirmed_scope.strip() != normalized:
+        raise BrainError("CONFIRMATION_REQUIRED")
+    if normalized not in _GOVERNANCE_SCOPES:
+        raise ValueError(f"review scope must be one of {', '.join(_GOVERNANCE_SCOPES)}")
+    if access not in {"read", "write", "none"}:
+        raise ValueError("access must be read, write or none")
+    clients, grants = tables["clients"], tables["permission_grants"]
+    now = datetime.now(timezone.utc)
+    with factory.begin() as session:
+        client = session.execute(sa.select(clients).where(clients.c.id == client_uuid)).mappings().one_or_none()
+        if client is None:
+            raise BrainError("NOT_FOUND")
+        scopes = set(client["scopes"])
+        tools = set(client["allowed_tools"])
+        if access == "none":
+            session.execute(grants.update().where(
+                grants.c.client_id == client_uuid, grants.c.effect == "allow",
+                grants.c.scope_pattern == normalized,
+                grants.c.tool_pattern.in_(("review.read", "review.write")),
+                grants.c.effective_to.is_(None),
+            ).values(effective_to=now))
+            action = "revoke_review_access"
+        else:
+            scopes.add(normalized)
+            tools.update({"review.read", "review.write"} if access == "write" else {"review.read"})
+            for tool in (("review.read", "review.write") if access == "write" else ("review.read",)):
+                exists = session.scalar(sa.select(grants.c.id).where(
+                    grants.c.client_id == client_uuid, grants.c.effect == "allow",
+                    grants.c.scope_pattern == normalized, grants.c.tool_pattern == tool,
+                    grants.c.effective_to.is_(None),
+                ))
+                if exists is None:
+                    session.execute(grants.insert().values(
+                        id=uuid4(), client_id=client_uuid, effect="allow", scope_pattern=normalized,
+                        tool_pattern=tool, sensitivity_ceiling="private", effective_from=now,
+                        effective_to=None, issuer="owner_local_operator",
+                        reason=f"explicit review {access} grant",
+                    ))
+            action = "grant_review_access"
+        session.execute(clients.update().where(clients.c.id == client_uuid).values(
+            scopes=sorted(scopes), allowed_tools=sorted(tools),
+            permission_epoch=int(client["permission_epoch"]) + 1,
+        ))
+        _audit(session, tables, owner_id=client["owner_id"], client_id=client_uuid,
+               action=action, scope=normalized, target_category="client", target_id=client_uuid)
+    return {"client_id": str(client_uuid), "scope": normalized, "access": access}
+
+
+def rebuild_index(factory: Any, tables: Mapping[str, sa.Table], *, batch_limit: int = 5000) -> dict[str, int]:
+    """Enqueue one durable re-index job per canonical indexable record.
+
+    The worker's ``rebuild_index`` handler re-reads each record and rewrites its
+    retrieval card, so this repairs missing or stale cards (a changed tokenizer or
+    embedding model, a restored backup, a card lost to an interrupted job) without
+    touching canonical data. Records that already have an active rebuild job are
+    skipped, so pressing this twice is safe.
+    """
+    selectors: tuple[tuple[str, str, Any], ...] = (
+        ("raw_input", "raw_inputs",
+         lambda table: sa.and_(table.c.lifecycle_state == "active",
+                               table.c.content_text.is_not(None))),
+        ("todo", "todos", lambda table: table.c.lifecycle_state == "active"),
+        ("self_claim", "self_claims",
+         lambda table: table.c.lifecycle_state.in_(("candidate", "active", "historical"))),
+        ("project", "projects", lambda table: sa.true()),
+        ("project_task", "project_tasks", lambda table: sa.true()),
+        ("checkpoint", "checkpoints", lambda table: sa.true()),
+        ("workspace_observation", "workspace_observations", lambda table: sa.true()),
+    )
+    jobs, owners = tables["jobs"], tables["owners"]
+    now = datetime.now(timezone.utc)
+    scanned = enqueued = 0
+    with factory.begin() as session:
+        owner_ids = list(session.scalars(sa.select(owners.c.id)))
+        for owner_id in owner_ids:
+            refs: list[str] = []
+            for target_type, table_name, predicate in selectors:
+                table = tables[table_name]
+                refs.extend(
+                    f"{target_type}:{row_id}" for row_id in session.scalars(
+                        sa.select(table.c.id).where(
+                            table.c.owner_id == owner_id, predicate(table),
+                        ).limit(batch_limit),
+                    )
+                )
+            scanned += len(refs)
+            for ref in refs:
+                active = session.scalar(sa.select(sa.func.count()).select_from(jobs).where(
+                    jobs.c.owner_id == owner_id, jobs.c.job_type == "rebuild_index",
+                    jobs.c.payload_ref == ref,
+                    jobs.c.state.in_(("queued", "retry_wait", "leased")),
+                ))
+                if active:
+                    continue
+                session.execute(jobs.insert().values(
+                    id=uuid4(), owner_id=owner_id, client_id=None, job_type="rebuild_index",
+                    payload_ref=ref,
+                    idempotency_key=uuid5(NAMESPACE_URL, f"brain-rebuild:{owner_id}:{ref}"),
+                    state="queued", priority=0, attempts=0, max_attempts=5,
+                    available_at=now, claim_token=0,
+                ))
+                enqueued += 1
+    return {"scanned": scanned, "enqueued": enqueued, "skipped_active": scanned - enqueued}
 
 
 def list_clients(factory: Any, tables: Mapping[str, sa.Table]) -> list[dict[str, object]]:

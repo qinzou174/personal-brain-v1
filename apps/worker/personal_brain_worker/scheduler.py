@@ -34,13 +34,16 @@ class DailySchedule:
             raise ValueError("daily schedule time is invalid")
 
 
-# Digest runs early morning for the previous day; evolution after it; health last.
+# Digest runs early morning for the previous day; evolution after it; dedupe last
+# (D2: after the day's promotion and conflict pass, duplicates are merged and
+# suspected pairs become one merge_candidate review item); health last.
 DEFAULT_SCHEDULES: tuple[DailySchedule, ...] = (
     DailySchedule("daily_digest", 3, 10),
     DailySchedule("promote_candidates", 4, 10),
     DailySchedule("retention_sweep", 4, 20),
     DailySchedule("conflict_scan", 4, 30),
     DailySchedule("retention_maintenance", 4, 40),
+    DailySchedule("dedupe_claims", 4, 50),
     DailySchedule("health_check", 8, 0),
 )
 

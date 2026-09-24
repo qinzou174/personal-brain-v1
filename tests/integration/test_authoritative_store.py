@@ -243,6 +243,45 @@ def _seed(factory, metadata):
     return owner_id, client_id
 
 
+def test_save_note_content_hash_opt_in_folds_an_identical_re_send(tmp_path):
+    """D3: a forked/regenerated client that re-sends the same entry must not double-store."""
+    import hashlib
+
+    from personal_brain_domain.common.errors import BrainError
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'dedupe.sqlite').as_posix()}")
+    metadata = _schema(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    owner_id, client_id = _seed(factory, metadata)
+    store = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
+    note = "对话归档：讨论了把记忆收拢到自有服务器。"
+
+    first = store.save_note(content=note, requested_scope="knowledge", idempotency_key=uuid4())
+    digest = hashlib.sha256(note.encode("utf-8")).hexdigest()
+    again = store.save_note(content=note, requested_scope="knowledge", idempotency_key=uuid4(),
+                            content_hash=digest)
+
+    assert again["status"] == "duplicate" and again["persistence"] == "already_committed"
+    assert again["record_id"] == first["record_id"]
+    with factory() as session:
+        raws = session.execute(sa.select(metadata.tables["raw_inputs"])).mappings().all()
+    assert len(raws) == 1
+
+    # Omitting the hash keeps the original behaviour: a second save is a second row.
+    plain = store.save_note(content=note, requested_scope="knowledge", idempotency_key=uuid4())
+    assert plain["record_id"] != first["record_id"]
+    with factory() as session:
+        assert len(session.execute(sa.select(metadata.tables["raw_inputs"])).mappings().all()) == 2
+
+    # A claimed hash that does not match the content is a client validation error.
+    with pytest.raises(BrainError) as mismatch:
+        store.save_note(content="不同的内容", requested_scope="knowledge", idempotency_key=uuid4(),
+                        content_hash=digest)
+    assert mismatch.value.code == "VALIDATION_FAILED"
+    engine.dispose()
+
+
 def test_canonical_expense_survives_restart_and_is_visible_to_another_process(tmp_path):
     from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
 

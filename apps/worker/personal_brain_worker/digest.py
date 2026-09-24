@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import sqlalchemy as sa
 
 from personal_brain_domain.common.errors import BrainError
+from personal_brain_domain.security.secret_filter import detect_secret
 from personal_brain_infra.models.gateway import ModelGateway, ProviderCallBudget
 from personal_brain_infra.storage.base import StorageBackend
 from personal_brain_worker.llm_budget import quota_exceeded
@@ -102,7 +103,7 @@ def make_digest_handler(
             groups.setdefault(row["requested_scope"], []).append(row)
         selected = sorted(groups)[:MAX_SCOPES_PER_RUN]
         zone = ZoneInfo(timezone_name)
-        digests = skipped_scopes = 0
+        digests = skipped_scopes = secret_skipped_scopes = secret_excluded = 0
         for scope in selected:
             items = groups[scope]
             digest_id = uuid5(NAMESPACE_URL, f"brain-digest:{owner_id}:{scope}:{label}")
@@ -115,11 +116,26 @@ def make_digest_handler(
             if exists is not None:
                 skipped_scopes += 1
                 continue
-            bundle = "\n".join(
-                f"[{row['original_at'].astimezone(zone):%H:%M}] "
-                f"{(row['content_text'] or '').strip().replace(chr(10), ' ')[:500]}"
-                for row in items
-            )[:MAX_BUNDLE_CHARS]
+            # Decision (b), 2026-09-25: secret-like records are never sent to a
+            # provider. They keep their place in the digest as a value-free marker
+            # (timing + source link stay navigable); a scope made up entirely of
+            # such records produces no model call at all.
+            lines, scope_secret = [], 0
+            for row in items:
+                stamp = f"[{row['original_at'].astimezone(zone):%H:%M}] "
+                text = (row["content_text"] or "").strip().replace(chr(10), " ")
+                if detect_secret(
+                    filename="digest-input.txt", content_type="text/plain", content=text,
+                ).matched:
+                    scope_secret += 1
+                    lines.append(f"{stamp}[疑似凭据内容，未发送给模型]")
+                else:
+                    lines.append(f"{stamp}{text[:500]}")
+            if scope_secret == len(items):
+                secret_skipped_scopes += 1
+                continue
+            secret_excluded += scope_secret
+            bundle = "\n".join(lines)[:MAX_BUNDLE_CHARS]
             source_links = [f"raw_input:{row['id']}" for row in items]
             sensitivity = _scope_sensitivity(items)
             context.progress(30, f"bounded digest call for scope {scope}")
@@ -132,6 +148,10 @@ def make_digest_handler(
                     sensitivity=sensitivity, budget=ProviderCallBudget(max_calls=1),
                 )
             except BrainError as error:
+                if error.code == "SECRET_REJECTED":
+                    # Defence in depth: a declared skip, never a dead letter.
+                    secret_skipped_scopes += 1
+                    continue
                 raise JobExecutionError(
                     error.code, retryable=error.code in {"BRAIN_UNAVAILABLE", "DEPENDENCY_CONFLICT"},
                 ) from error
@@ -175,7 +195,8 @@ def make_digest_handler(
             digests += 1
         context.progress(100, "daily digests committed")
         return {"digests": digests, "skipped_scopes": skipped_scopes,
-                "dropped_scopes": len(groups) - len(selected), "scopes": selected, "date": label}
+                "dropped_scopes": len(groups) - len(selected), "scopes": selected, "date": label,
+                "secret_excluded": secret_excluded, "secret_skipped_scopes": secret_skipped_scopes}
 
     return handler
 

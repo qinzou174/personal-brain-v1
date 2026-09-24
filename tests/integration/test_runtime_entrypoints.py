@@ -191,6 +191,57 @@ def test_worker_rechecks_authority_before_commit_and_reports_progress(tmp_path):
     engine.dispose()
 
 
+def test_dead_letters_explain_themselves_in_readable_value_free_words(tmp_path):
+    from personal_brain_worker.runtime import DurableJobPoller, JobExecutionError
+
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    jobs = sa.Table(
+        "jobs", metadata,
+        sa.Column("id", sa.String, primary_key=True), sa.Column("owner_id", sa.String, nullable=False),
+        sa.Column("job_type", sa.String, nullable=False), sa.Column("payload_ref", sa.String, nullable=False),
+        sa.Column("state", sa.String, nullable=False), sa.Column("priority", sa.Integer, nullable=False),
+        sa.Column("attempts", sa.Integer, nullable=False), sa.Column("max_attempts", sa.Integer, nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("lease_owner", sa.String), sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
+        sa.Column("claim_token", sa.Integer, nullable=False), sa.Column("started_at", sa.DateTime(timezone=True)),
+        sa.Column("finished_at", sa.DateTime(timezone=True)), sa.Column("error_code", sa.String),
+        sa.Column("error_summary", sa.String), sa.Column("result_refs", sa.JSON),
+    )
+    metadata.create_all(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    with factory.begin() as session:
+        for job_id, max_attempts in (("reject", 5), ("crash", 1)):
+            session.execute(jobs.insert().values(
+                id=job_id, owner_id="o1", job_type=job_id, payload_ref=f"secret-laden:{job_id}",
+                state="queued", priority=0, attempts=0, max_attempts=max_attempts,
+                available_at=now, claim_token=0,
+            ))
+
+    def reject(_job, _context):
+        raise JobExecutionError("SECRET_REJECTED", retryable=False)
+
+    def crash(_job, _context):
+        raise KeyError("payload content must never leak into the summary")
+
+    poller = DurableJobPoller(
+        factory, jobs, worker_id="w1", handlers={"reject": reject, "crash": crash},
+    )
+    assert poller.poll() == 2
+
+    with factory() as session:
+        rows = {row["id"]: row for row in session.execute(sa.select(jobs)).mappings().all()}
+    assert rows["reject"]["state"] == "dead_letter"
+    assert "凭据" in rows["reject"]["error_summary"]
+    assert "secret-laden" not in rows["reject"]["error_summary"]
+    assert rows["crash"]["state"] in {"retry_wait", "dead_letter"}  # retryable bound by max_attempts
+    assert rows["crash"]["error_code"] == "BRAIN_UNAVAILABLE"
+    assert "KeyError" in rows["crash"]["error_summary"]
+    assert "payload content" not in rows["crash"]["error_summary"]
+    engine.dispose()
+
+
 def test_production_worker_registry_covers_required_durable_work_categories(tmp_path):
     from personal_brain_infra.storage.local import LocalStorage
     from personal_brain_worker.job_handlers import build_job_handlers
@@ -203,4 +254,6 @@ def test_production_worker_registry_covers_required_durable_work_categories(tmp_
         "retention_maintenance", "notify_review",
         # Δ1-Δ4 activation: the periodic scheduler's job types must all be owned.
         "daily_digest", "promote_candidates", "retention_sweep", "conflict_scan",
+        # D2 duplicate control (extraction-time rule + daily sweep).
+        "dedupe_claims",
     } <= set(handlers)

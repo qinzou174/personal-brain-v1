@@ -168,7 +168,12 @@ def test_health_check_notifies_on_failures_and_stays_quiet_when_healthy(harness)
     assert healthy["failed_jobs"] == 0 and healthy["notified"] is False
     assert table_rows(harness, "notifications", owner_id=owner_id) == []
 
-    queue_job(harness, owner_id, job_type="index_todo", payload_ref="todo:x", state="dead_letter")
+    failed_job_id = queue_job(harness, owner_id, job_type="index_todo", payload_ref="todo:x",
+                              state="dead_letter")
+    with harness.factory.begin() as session:
+        session.execute(harness.tables["jobs"].update().where(
+            harness.tables["jobs"].c.id == failed_job_id,
+        ).values(error_code="SECRET_REJECTED"))
     result = handlers["health_check"]({"owner_id": owner_id, "payload_ref": "schedule:health_check:x"},
                                        FakeContext())
 
@@ -179,6 +184,8 @@ def test_health_check_notifies_on_failures_and_stays_quiet_when_healthy(harness)
     assert notification["trigger_type"] == "brain_health_failure"
     assert notification["channel"] == "inbox" and notification["state"] == "queued"
     assert notification["priority"] == "high"
+    # The notice explains itself in readable, value-free words (D-两小病之一).
+    assert "凭据" in notification["reason"]
 
     dispatch_jobs = [job for job in table_rows(harness, "jobs", owner_id=owner_id)
                      if job["job_type"] == "dispatch_notification"]

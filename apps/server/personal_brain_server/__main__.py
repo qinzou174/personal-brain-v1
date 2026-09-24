@@ -31,8 +31,8 @@ from personal_brain_server.runtime import build_doctor_probe, build_readiness_pr
 from personal_brain_server.security.oauth_runtime import OAuthBearerAuthority
 from personal_brain_domain.common.errors import BrainError
 from personal_brain_server.admin import (
-    list_clients, provision_client, revoke_client, rotate_client_credential,
-    set_project_access,
+    list_clients, provision_client, rebuild_index, revoke_client, rotate_client_credential,
+    set_project_access, set_review_access,
 )
 
 
@@ -58,8 +58,20 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     project.add_argument("--access", required=True, choices=("read", "write", "none"))
     project.add_argument("--confirm-client-id", required=True)
     project.add_argument("--confirm-project-id", required=True)
+    review = commands.add_parser(
+        "review-access", help="grant or revoke governance (review) access on one content scope",
+    )
+    review.add_argument("--client-id", required=True)
+    review.add_argument("--scope", required=True)
+    review.add_argument("--access", required=True, choices=("read", "write", "none"))
+    review.add_argument("--confirm-client-id", required=True)
+    review.add_argument("--confirm-scope", required=True)
     clients = commands.add_parser("list-clients", help="list client status and effective configured scopes")
     clients.add_argument("--json", action="store_true")
+    rebuild = commands.add_parser(
+        "rebuild-index", help="enqueue one re-index job per canonical record (safe to repeat)",
+    )
+    rebuild.add_argument("--limit", type=int, default=5000, help="max records per table")
     return parser.parse_args(argv)
 
 
@@ -121,8 +133,16 @@ def _admin_command(settings: Settings, args: argparse.Namespace) -> dict[str, ob
                 confirmed_client_id=args.confirm_client_id,
                 confirmed_project_id=args.confirm_project_id,
             )
+        if args.command == "review-access":
+            return set_review_access(
+                factory, metadata.tables, client_id=args.client_id, scope=args.scope,
+                access=args.access, confirmed_client_id=args.confirm_client_id,
+                confirmed_scope=args.confirm_scope,
+            )
         if args.command == "list-clients":
             return list_clients(factory, metadata.tables)
+        if args.command == "rebuild-index":
+            return rebuild_index(factory, metadata.tables, batch_limit=args.limit)
         raise ValueError("unsupported operator command")
     finally:
         engine.dispose()
@@ -139,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report.get("ready") else 2
         if args.command in {
             "provision-client", "rotate-client", "revoke-client", "project-access", "list-clients",
+            "review-access", "rebuild-index",
         }:
             result = _admin_command(settings, args)
             print(json.dumps(result, ensure_ascii=False, default=str))
