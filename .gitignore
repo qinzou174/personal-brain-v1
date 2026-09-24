@@ -54,3 +54,7 @@ Thumbs.db
 deploy/windows-local/fetch_logs.py
 deploy/windows-local/inspect_server_auth.py
 deploy/windows-local/inspect_auth.py
+deploy/windows-local/server_exec.py
+deploy/windows-local/server_deploy.py
+deploy/windows-local/sync_to_server.py
+.git-commit-msg.txt
