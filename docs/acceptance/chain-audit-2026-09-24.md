@@ -73,7 +73,7 @@
 | ID | 级别 | 白话 | 证据 | 断点位置 | 状态 |
 |---|---|---|---|---|---|
 | F1 | P3 | 待办快速完成时首条索引作业死信 VERSION_CONFLICT，残留噪声 | jobs 表 todo:2dc67243 双作业一死一活 | add_todo→complete 竞态；根因=before_commit 版本栅栏误伤索引作业 | **已修复（见下）** |
-| O2 | P3 | 账目"拿铁28"用"咖啡"问不出 | finance 作用域正确可搜到；knowledge 作用域本就不该搜到账目 | 作用域隔离设计（+长文干扰） | **已缓解（见下）** |
+| O2 | P3 | 账目"拿铁28"用"咖啡"问不出 | finance 作用域正确可搜到；knowledge 作用域本就不该搜到账目 | 作用域隔离设计（+长文干扰） | **已修复（见下）** |
 | O3 | P3 | get_brain_context("general") 空 | authorized_tools.py:331-335 | intent 作为检索词，字段语义模糊 | 记录，未改 |
 | O4 | - | get_recent_changes 多传 limit 被拒（测试误用） | protocols/tools.py:73 | 无（schema 严格是特性）| 记录 |
 
@@ -83,7 +83,8 @@
 
 **F1（已修，VERIFIED）**：`apps/worker/personal_brain_worker/job_handlers.py` build_job_recheck 增加 `VERSION_EXEMPT`（index_* 家族），索引作业在双围栏间版本变化不再误报 VERSION_CONFLICT（索引作业执行时重读当前行，版本栅栏只该约束真正依赖旧版本的写作业）。回归：`test_real_journeys.py::test_index_job_tolerates_version_change_between_fences` + 对照组确认写作业仍拒绝版本漂移；实机复验 add→complete 极速连作两条 index_todo 全 succeeded、dead_letter=0。
 
-**O2（已缓解，VERIFIED）**：`packages/infrastructure/personal_brain_infra/search/repository.py` 排序加入 `_length_penalty`（≤400 字不罚，更长单调衰减至 0.1 封顶），防止超长档案（整段嵌入主题平均 + OR 命中累积）压过精确短记录。单测 `tests/unit/test_length_penalty.py`。另经实查确认：账目以 `finance` 作用域索引，`knowledge` 作用域搜不到是**作用域隔离的设计正确行为**；finance 作用域下"拿铁/咖啡/打车回家"均精确命中第一名。
+**O2（已修复，VERIFIED，2026-09-24 二次修正）**：原缓解把 `_length_penalty`（≤400 字不罚，更长按 `400/len` 单调衰减至 0.1）乘到 RRF 融合分上。2026-09-24 复核实测证明这是类别错误：RRF 融合分区间只有 0.009~0.033，而罚项跨度 10 倍，于是排序由**长度**而非相关性决定，长档案实际不可检索。实证：query "壁纸" 的唯一词法命中（keyword rank 1）且语义 rank 1 的档案（searchable_text 2031 字）被乘 0.197，分数从第 1 的 0.0328 掉到 0.0065，跌出前 30（limit=30 实测不可见），`answer_brain` 因此答"现有的个人知识库证据中没有关于壁纸的任何内容"。修正：长度归一化只留在**词法列表内部**（`ts_rank_cd / (1 + ln(文档长度))`，BM25 式匹配密度），RRF 融合分不再乘任何文档属性；语义列表保持纯余弦距离（实测长档案在语义列表的名次本就正确，加长度项属无据推测）。
+回归证据：`tests/integration/test_search_ranking.py`（长档案=唯一词法命中、被 30 条语义更近的短笔记包围，仍须排第 1；**旧代码下该用例失败、新代码通过**）+ `tests/unit/test_length_normalization.py`（融合分不得被长度缩放）；全套回归 533 passed / 12 skipped / 0 failed（真实 PG，brain_test）。真实库复验（本机实例 127.0.0.1:18082 数据，真实 doubao-embedding-vision 查询向量）："壁纸" 档案由「前 30 名不可见」变为第 1 名（0.0328）；短精确记录无回归——"西湖"日记仍第 1、"拿铁"账目仍第 1（0.0328）、"猫"由日记第 1/档案不可见变为猫档案第 1 + 日记第 2、"苏晚"由测试残留笔记占位变为含苏晚章节的档案第 1。
 
 **maintenance**：清理 14 条 dead_letter（F1 复现 3 条 index_todo + 历史 10 条 refresh_project_context + 1 条 extract），当前 jobs 全部 succeeded。
 
