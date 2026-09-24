@@ -35,7 +35,6 @@ DIGEST_VERSION = "digest-v1"
 # The gateway bounds the whole encoded request to 64KiB; CJK text is ~3 bytes per
 # character, so the bundle stays well inside that ceiling.
 MAX_BUNDLE_CHARS = 12000
-MAX_SCOPES_PER_RUN = 5
 _SENSITIVITY_ORDER = ("normal", "personal", "private", "highly_private")
 
 _DIGEST_INSTRUCTION = (
@@ -101,7 +100,12 @@ def make_digest_handler(
         groups: dict[str, list[Mapping[str, Any]]] = {}
         for row in rows:
             groups.setdefault(row["requested_scope"], []).append(row)
-        selected = sorted(groups)[:MAX_SCOPES_PER_RUN]
+        # Every scope that recorded something yesterday gets its digest — the old
+        # 5-scope cap silently dropped the rest of the day. Cost stays bounded by
+        # the shared daily LLM job quota (the same budget extraction draws from),
+        # and existing digests are replay-skipped before any model call.
+        selected = sorted(groups)
+        dropped_scopes = 0
         zone = ZoneInfo(timezone_name)
         digests = skipped_scopes = secret_skipped_scopes = secret_excluded = 0
         for scope in selected:

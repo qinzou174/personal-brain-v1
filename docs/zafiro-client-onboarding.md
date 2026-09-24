@@ -142,6 +142,24 @@ docker compose exec -T api python -m personal_brain_server project-access \
   --confirm-project-id <project_id>
 ```
 
+> **删除/复核（重要，这是设计不是 bug）**：`create_deletion_plan`、`create_review_item`
+> 按 `review.write@<目标内容域>` 授权。默认只授予了 `review` 域，所以对 knowledge /
+> finance / asset / **projects** 的内容发起删除或复核会返回 `SCOPE_DENIED`——需要先由
+> owner 显式开放对应内容域的治理权（删除是危险操作，逐域放行是有意的门槛）：
+>
+> ```bash
+> docker compose exec -T api python -m personal_brain_server review-access \
+>   --client-id a567a812-8363-4fae-ab8c-95f4aee31132 \
+>   --scope projects --access write \
+>   --confirm-client-id a567a812-8363-4fae-ab8c-95f4aee31132 \
+>   --confirm-scope projects
+> ```
+>
+> 治理审批单（`deletion_confirmation` / `merge_candidate` / `conflict` 等）生成后会写入
+> 通知盒（`notifications`，channel=inbox），客户端可通过 `list_review_items` 处理；批准
+> 与否各是一次 `resolve_review_item` 调用。`checkpoint_task` / `finalize_task` 的授权按
+> **任务所属项目**判定（`requested_scope` 参数仅为兼容保留，不影响授权）。
+
 ---
 
 ## 6. 调用约定

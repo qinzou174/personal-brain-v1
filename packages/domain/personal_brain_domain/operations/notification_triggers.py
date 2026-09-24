@@ -11,8 +11,9 @@ from dataclasses import dataclass
 
 _TRIGGERS = frozenset({
     "todo_deadline", "sync_index_failure", "backup_storage_failure", "brain_health_failure", "preference_trend",
+    "review_item_pending",
 })
-_NOTIFYING_TRIGGERS = frozenset({"todo_deadline", "sync_index_failure", "backup_storage_failure", "brain_health_failure"})
+_NOTIFYING_TRIGGERS = frozenset({"todo_deadline", "sync_index_failure", "backup_storage_failure", "brain_health_failure", "review_item_pending"})
 
 
 @dataclass(frozen=True)

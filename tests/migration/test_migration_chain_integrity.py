@@ -1,4 +1,4 @@
-"""Full migration chain integrity: 0001..0011 linked, acyclic, no gaps (T012/T020).
+"""Full migration chain integrity: 0001..0013 linked, acyclic, no gaps (T012/T020).
 
 Runs without PostgreSQL: it validates the chain metadata statically. The
 physical round-trip requires BRAIN_TEST_POSTGRES_DSN (environment gate).
@@ -24,6 +24,7 @@ EXPECTED_ORDER = [
     "0010_operations",
     "0011_notifications",
     "0012_search_read_grants",
+    "0013_review_notification_trigger",
 ]
 
 
@@ -45,11 +46,11 @@ def test_chain_is_contiguous_and_acyclic():
 
 def test_no_orphan_or_duplicate_nodes():
     parents = [migration.down_revision for migration in (_load(r) for r in EXPECTED_ORDER) if migration.down_revision is not None]
-    # Every node except the head (0012) is referenced exactly once as a parent;
+    # Every node except the head (0013) is referenced exactly once as a parent;
     # the root (0001) has no parent. No duplicates, no gaps.
     assert len(parents) == len(EXPECTED_ORDER) - 1
     assert len(set(parents)) == len(parents)
-    assert set(parents) == set(EXPECTED_ORDER) - {"0012_search_read_grants"}
+    assert set(parents) == set(EXPECTED_ORDER) - {"0013_review_notification_trigger"}
 
 
 def test_source_and_target_versions_line_up():

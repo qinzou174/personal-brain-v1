@@ -125,8 +125,60 @@ def build_job_handlers(session_factory: Any, tables: Mapping[str, sa.Table],
         return result
 
     def inbox_only(job, context):
-        context.progress(100, "durable inbox item available")
-        return {"notified": "owner_inbox", "payload_ref": job["payload_ref"]}
+        """Deliver a review item as a durable owner notification.
+
+        "notify" used to mean "return a JSON string": the inbox item existed only
+        if the client went looking for it. The notification row is the delivery
+        contract (FR-091) — one per item, deduped by the item itself, so an owner
+        actually learns that a confirmation is waiting.
+        """
+        owner_id = UUID(str(job["owner_id"]))
+        notifications = tables["notifications"]
+        review_item_id = str(job["payload_ref"]).split(":", 1)[-1]
+        moment = datetime.now(timezone.utc)
+        with session_factory.begin() as session:
+            item = session.execute(sa.select(tables["review_inbox_items"]).where(
+                tables["review_inbox_items"].c.id == review_item_id,
+                tables["review_inbox_items"].c.owner_id == owner_id,
+            )).mappings().one_or_none()
+            if item is None or item["state"] != "open":
+                return {"notified": False, "skipped": "item_closed_or_missing",
+                        "payload_ref": job["payload_ref"]}
+            dedupe_key = f"review_item:{review_item_id}"
+            exists = session.scalar(sa.select(sa.func.count()).select_from(notifications).where(
+                notifications.c.owner_id == owner_id, notifications.c.dedupe_key == dedupe_key,
+            ))
+            if exists:
+                return {"notified": True, "deduplicated": True, "payload_ref": job["payload_ref"]}
+            proposal = dict(item["proposal"] or {})
+            summary = {
+                "profile_confirmation": "有一条画像确认等待你的裁决",
+                "deletion_confirmation": "有一条删除申请等待你的批准",
+                "merge_candidate": "发现疑似重复画像，等待你确认合并",
+                "conflict": "发现自相矛盾的记录，等待你裁决",
+            }.get(item["item_type"], "有一条治理事项等待你处理")
+            detail = proposal.get("summary") or proposal.get("kind") or ""
+            notification_id = uuid4()
+            session.execute(notifications.insert().values(
+                id=notification_id, owner_id=owner_id, trigger_type="review_item_pending",
+                source_object_id=review_item_id, risk=item["risk"],
+                priority="high" if item["risk"] in {"high", "critical"} else "normal",
+                dedupe_key=dedupe_key, cooldown_group="review_item", channel="inbox",
+                state="queued",
+                reason=f"{summary}（{item['item_type']}{'；' + str(detail) if detail else ''}）",
+                delivered_at=None, acknowledged_at=None,
+            ))
+            session.execute(tables["jobs"].insert().values(
+                id=uuid4(), owner_id=owner_id, client_id=None,
+                job_type="dispatch_notification",
+                payload_ref=f"notification:{notification_id}",
+                idempotency_key=uuid5(NAMESPACE_URL, f"brain-review-notify:{notification_id}"),
+                state="queued", priority=0, attempts=0, max_attempts=5,
+                available_at=moment, claim_token=0,
+            ))
+        context.progress(100, "review notification queued")
+        return {"notified": True, "notification_id": str(notification_id),
+                "payload_ref": job["payload_ref"]}
 
     def reconcile_deletion(job, context):
         try:

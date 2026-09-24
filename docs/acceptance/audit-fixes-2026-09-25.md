@@ -48,8 +48,48 @@ uv run python deploy/windows-local/pull_backup.py
 
 | 项 | 说明 | 建议 |
 |---|---|---|
-| 治理闭环缺口（P3-11） | `conflict` 型复核项批准后 conflicts 行不闭合；`ambiguity/permission_change/failed_reconciliation` 无生产者；过期删除计划不置 expired | 单独一批治理工作 |
+| ~~治理闭环缺口（P3-11）~~ | ~~`conflict` 型复核项批准后 conflicts 行不闭合；无生产者死类型；过期删除计划不置 expired~~ | **已在批 6 修复**（见下） |
 | Bridge 离线队列未接线 | `PendingStore` 仍无入口引用（字段契约已对齐） | Bridge 启用时做 |
-| write-after-delete | record_decision/start_task/sync_workspace 仍可对墓碑项目写行（检索侧已封死） | 与治理批一起 |
+| ~~write-after-delete~~ | ~~record_decision/start_task/sync_workspace 仍可对墓碑项目写行~~ | **已在批 6 修复**（见下） |
 | nginx/隧道实机配置 | `client_max_body_size`、`proxy_read_timeout` 未核实 | 有网络层症状时查 |
-| digest 每日 5 scope 上限、调度不补跨日 | P3 观察项 | 数据量上来后再议 |
+| ~~digest 每日 5 scope 上限~~ | ~~超过 5 个作用域的摘要被静默截断~~ | **已在批 6 修复**（见下） |
+| digest 调度不补跨日 | 错过 03:10 窗口的当日摘要不会补算 | 数据量上来后再议 |
+
+---
+
+# 批 6：治理闭环、墓碑写门禁、通知送达、digest 全量（2026-09-25）
+
+> 上游：用户拍板"值得修的 5 条"（白话解释中的 ①-⑤）。本批全部落码并配集成测试。
+
+## 修复内容
+
+**① 治理闭环（原 P3-11）**
+- `resolve_review_item` 新增 `conflict` 分支：批准 → conflicts 行置 `resolved_by_user`；拒绝 → 置 `tolerated`。participants 与库内比对不一致返回 `CONFLICT_MISMATCH`，防止裁决错行。
+- `evolution.conflict_scan` 的 known_pairs 合并 conflicts 表所有非 open 行的 participants——**裁决过的对永不重新生成**（原缺陷：批准后下一轮扫描又生成同样的 conflict，死循环刷 Inbox）。
+- 过期删除确认改为**终态提交**：原来抛 `CONFIRMATION_EXPIRED` 事务回滚，item 永远 open、每天重复提醒；现在关闭 item（resolved）、plan 置 `confirmation_state=expired`、写 audit、返回 `{"status": "expired", "persistence": "canonical_committed"}`。确认单 15 分钟时限从此是真实的生命周期而非摆设。
+
+**② 墓碑项目写门禁（write-after-delete）**
+六处补存活门禁（`lifecycle_state == "active"`）：`record_project_fact`、`start_project_task`、`sync_workspace` 项目查询、`checkpoint_project_task`、`finalize_project_task`、`project_of_task`（后四处在存在性查询中 join projects 过滤，store 层直接拦截，不再依赖 service 层）。删除项目后的迟到写入现在返回 `NOT_FOUND` 而非复活行。
+
+**③ 通知真正送达（notify_review 空壳）**
+- `inbox_only` 写真实 notifications 行：`trigger_type=review_item_pending`、`channel=inbox`、`dedupe_key=review_item:<item_id>`（幂等，重复投递去重）、`priority` 按 risk 映射（high/critical→high，否则 normal）、`reason` 带四种 item_type 的中文话术；插入后另排 `dispatch_notification` 派生作业。
+- **迁移 `0013_review_notification_trigger`**：0011 的 CHECK 枚举不含新触发类型，收窄枚举让每条复核通知都 IntegrityError 死信——扩 `notification_trigger_allowed` 加入 `review_item_pending`。
+- domain 触发器注册表 `_TRIGGERS`/`_NOTIFYING_TRIGGERS` 补录，白名单与现实一致。
+- 四处 revision 登记表同步（e2e harness、全链 PG 测试、链完整性测试、备份源构建）。
+
+**④ 文档**：`docs/zafiro-client-onboarding.md` 增"删除/复核（重要，这是设计不是 bug）"段落——`review.write@<内容域>` 授权模型、`review-access` 放行命令、通知盒机制、checkpoint/finalize 按任务所属项目授权。
+
+**⑤ digest 全量处理**：删除 `MAX_SCOPES_PER_RUN = 5`，`selected = sorted(groups)` 处理全部作用域（原第 6 个起被静默截断）；每日 LLM 作业配额仍是预算兜底。
+
+## 验证
+
+- 新增 `tests/integration/test_governance_closures.py`（真实 PG harness）4 项：
+  1. conflict 裁决闭合 conflicts 行且不再重新生成
+  2. 过期删除计划终止为终态（item resolved + plan expired）而非永远 pending
+  3. 墓碑项目拒绝全部六类写入/读取
+  4. notify_review 写 notifications 行 + 幂等去重
+- 全量回归：**584 passed / 12 skipped / 0 failed**（批 4 后基线 580 + 新增 4）。
+
+## 生产验证
+
+（部署后补充）

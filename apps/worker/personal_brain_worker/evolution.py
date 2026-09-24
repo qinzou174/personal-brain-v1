@@ -272,6 +272,18 @@ def make_conflict_handler(
             )).mappings().all()
             known_pairs = {frozenset(str(ref) for ref in (row["subject_refs"] or []))
                            for row in open_items}
+            # A verdict the owner already gave is final: adjudicated conflicts
+            # (resolved/tolerated) must never regenerate the same item, or the
+            # owner sees the same contradiction every single day.
+            if "conflicts" in tables:
+                adjudicated = session.execute(sa.select(conflicts_table.c.participants).where(
+                    conflicts_table.c.owner_id == owner_id,
+                    conflicts_table.c.state != "open",
+                )).mappings().all()
+                known_pairs.update(
+                    frozenset(str(ref) for ref in (row["participants"] or []))
+                    for row in adjudicated
+                )
             # One conflict item per contradicting topic: ten opposite notes under
             # the same topic are one thing for the owner to review, not ten.
             by_id = {str(row["id"]): row for row in rows}

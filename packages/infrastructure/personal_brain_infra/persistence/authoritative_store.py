@@ -786,8 +786,49 @@ class AuthoritativeStore:
             if expires_at is not None:
                 if expires_at.tzinfo is None:
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
-                if now >= expires_at:
-                    raise BrainError("CONFIRMATION_EXPIRED")
+                if now >= expires_at and row["state"] == "open":
+                    # An expired confirmation is a *terminal state*, not a
+                    # transient error: close the item and its plan inside this
+                    # same commit. Raising here used to roll the closure back,
+                    # so plans stayed "pending" forever and could keep resurfacing.
+                    session.execute(items.update().where(
+                        items.c.id == row["id"], items.c.state == "open",
+                    ).values(state="resolved", resolved_at=now, updated_at=now,
+                             resolver_id=self._db_id(items, "resolver_id", self.client_id)))
+                    if row["item_type"] == "deletion_confirmation" and "deletion_plans" in self.tables:
+                        try:
+                            stale_plan_id = UUID(str(row["proposal"].get("plan_id")))
+                        except (ValueError, TypeError):
+                            stale_plan_id = None
+                        if stale_plan_id is not None:
+                            session.execute(self.tables["deletion_plans"].update().where(
+                                self.tables["deletion_plans"].c.id == self._db_id(
+                                    self.tables["deletion_plans"], "id", stale_plan_id,
+                                ),
+                                self.tables["deletion_plans"].c.owner_id == self._db_id(
+                                    self.tables["deletion_plans"], "owner_id", self.owner_id,
+                                ),
+                                self.tables["deletion_plans"].c.confirmation_state == "pending",
+                            ).values(confirmation_state="expired", updated_at=now))
+                    session.execute(audit.insert().values(
+                        id=self._db_id(audit, "id", audit_id),
+                        owner_id=self._db_id(audit, "owner_id", self.owner_id),
+                        client_id=self._db_id(audit, "client_id", self.client_id),
+                        correlation_id=self._db_id(audit, "correlation_id", correlation_id),
+                        action="expire_review_item", tool="review.write", effective_scope="review",
+                        target_category="review_item", target_id=self._db_id(audit, "target_id", item_id),
+                        outcome="expired", error_code=None, duration_ms=0, occurred_at=now,
+                        risk="high", authorization_decision="allow",
+                    ))
+                    outcome = {
+                        "status": "expired", "persistence": "canonical_committed",
+                        "review_item_id": str(item_id),
+                    }
+                    complete_claim(session, claims, claim_id=claim.id, outcome=outcome)
+                    if pre_commit is not None:
+                        pre_commit()
+                    uow.commit()
+                    return outcome
             if row["state"] != "open":
                 raise BrainError("CONFIRMATION_REQUIRED")
             if int(row["expected_version"]) != expected_version:
@@ -848,6 +889,31 @@ class AuthoritativeStore:
                         self.tables["deletion_plans"].c.confirmation_state == "pending",
                     ).values(
                         confirmation_state="rejected", updated_at=now,
+                    ))
+            elif row["item_type"] == "conflict" and "conflicts" in self.tables:
+                # The review item IS the contradiction's closure path: without
+                # writing the verdict back, the conflict stayed open forever and
+                # the daily scan kept generating the same item again and again.
+                # approved = "confirmed as a real contradiction"; rejected =
+                # "not a contradiction, tolerate the pair".
+                verdict = "resolved_by_user" if decision == "approved" else "tolerated"
+                wanted = sorted(str(ref) for ref in row["subject_refs"] or [])
+                conflicts_table = self.tables["conflicts"]
+                open_rows = session.execute(sa.select(conflicts_table).where(
+                    conflicts_table.c.owner_id == self._db_id(
+                        conflicts_table, "owner_id", self.owner_id,
+                    ),
+                    conflicts_table.c.state == "open",
+                )).mappings().all()
+                for conflict_row in open_rows:
+                    if sorted(str(ref) for ref in conflict_row["participants"] or []) != wanted:
+                        continue
+                    session.execute(conflicts_table.update().where(
+                        conflicts_table.c.id == conflict_row["id"],
+                    ).values(
+                        state=verdict, resolution={"review_item_id": str(row["id"]),
+                                                   "decision": decision},
+                        resolver=str(self.owner_id), updated_at=now,
                     ))
             session.execute(audit.insert().values(
                 id=self._db_id(audit, "id", audit_id),
@@ -1158,6 +1224,7 @@ class AuthoritativeStore:
             exists = session.execute(sa.select(projects.c.id).where(
                 projects.c.id == self._db_id(projects, "id", project_id),
                 projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
             )).scalar_one_or_none()
         if exists is None:
             raise BrainError("NOT_FOUND")
@@ -1180,19 +1247,24 @@ class AuthoritativeStore:
         )
 
     def project_of_task(self, task_id: UUID) -> UUID | None:
-        """The project a task belongs to, so callers can authorize per project.
+        """The active project a task belongs to, so callers can authorize per project.
 
         Checkpoint/finalize used to authorize against a caller-supplied scope,
         which let any client holding a broad scope write into a project it was
-        never granted; the owner's task row is the authoritative binding.
+        never granted; the owner's task row is the authoritative binding. A
+        tombstoned parent project returns None — its tasks are unreachable.
         """
         tasks = self.tables["project_tasks"]
+        projects = self.tables["projects"]
         with self._session_factory() as session:
             self._assert_authority(session)
-            project_id = session.scalar(sa.select(tasks.c.project_id).where(
+            project_id = session.execute(sa.select(tasks.c.project_id).where(
                 tasks.c.id == self._db_id(tasks, "id", task_id),
                 tasks.c.owner_id == self._db_id(tasks, "owner_id", self.owner_id),
-            ))
+                projects.c.id == tasks.c.project_id,
+                projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
+            )).scalar()
         return None if project_id is None else UUID(self._external_id(project_id))
 
     def checkpoint_project_task(
@@ -1203,10 +1275,14 @@ class AuthoritativeStore:
         pre_commit: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         tasks = self.tables["project_tasks"]
+        projects = self.tables["projects"]
         with self._session_factory() as session:
             exists = session.execute(sa.select(tasks.c.id).where(
                 tasks.c.id == self._db_id(tasks, "id", task_id),
                 tasks.c.owner_id == self._db_id(tasks, "owner_id", self.owner_id),
+                projects.c.id == tasks.c.project_id,
+                projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
             )).scalar_one_or_none()
         if exists is None:
             raise BrainError("NOT_FOUND")
@@ -1235,6 +1311,17 @@ class AuthoritativeStore:
         if kind not in {"decision", "constraint"}:
             raise ValueError("kind must be decision or constraint")
         table_name = f"{kind}s"
+        # A tombstoned project accepts no new facts (they would be invisible but
+        # still stored, and a later refresh job would index nothing).
+        projects = self.tables["projects"]
+        with self._session_factory() as session:
+            alive = session.execute(sa.select(projects.c.id).where(
+                projects.c.id == self._db_id(projects, "id", project_id),
+                projects.c.owner_id == self._db_id(projects, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
+            )).scalar_one_or_none()
+        if alive is None:
+            raise BrainError("NOT_FOUND")
         dedupe = f"{kind}:{statement.strip().lower()}"
         # The (owner_id, deduplication_key) unique constraint is an intentional
         # content dedupe. A repeat statement must replay the existing record
@@ -1288,10 +1375,14 @@ class AuthoritativeStore:
         pre_commit: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         tasks = self.tables["project_tasks"]
+        projects = self.tables["projects"]
         with self._session_factory() as session:
-            task = session.execute(sa.select(tasks).where(
+            task = session.execute(sa.select(tasks).join(
+                projects, projects.c.id == tasks.c.project_id,
+            ).where(
                 tasks.c.id == self._db_id(tasks, "id", task_id),
                 tasks.c.owner_id == self._db_id(tasks, "owner_id", self.owner_id),
+                projects.c.lifecycle_state == "active",
             )).mappings().one_or_none()
         if task is None:
             raise BrainError("NOT_FOUND")
@@ -1355,6 +1446,7 @@ class AuthoritativeStore:
             self._assert_authority(session)
             project = session.execute(sa.select(projects).where(
                 projects.c.id == project_key, projects.c.owner_id == owner,
+                projects.c.lifecycle_state == "active",
             )).mappings().one_or_none()
             if project is None:
                 raise BrainError("NOT_FOUND")

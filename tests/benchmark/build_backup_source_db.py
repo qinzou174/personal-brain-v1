@@ -24,6 +24,7 @@ EXPECTED_ORDER = [
     "0004_memory_self_model", "0005_project_brain", "0006_assets_search",
     "0007_retrieval_context", "0008_lifecycle_deletion", "0009_external_sources",
     "0010_operations", "0011_notifications", "0012_search_read_grants",
+    "0013_review_notification_trigger",
 ]
 
 
