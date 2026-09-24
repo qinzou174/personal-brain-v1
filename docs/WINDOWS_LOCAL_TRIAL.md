@@ -28,11 +28,14 @@
 
 ## 模型回答
 
-当前本机尚无 Ark API Key 文件，因而 `answer_brain` 和向量检索未启用；
-普通笔记、待办、费用、项目工具和中文全文检索可以试用。要启用用户此前指定的
-DeepSeek 与豆包向量模型，将密钥单独保存为
-`E:\Personal-Brain-V1-local\secrets\model-api-key`，然后执行关闭、启动脚本。
-不要把密钥写入项目、TRAE 配置或聊天。启用后，笔记内容和检索问题会发送到
-火山引擎 Ark 接口。
+本机已启用真实模型（T197，2026-09-24 验证）：密钥存放在
+`E:\Personal-Brain-V1-local\secrets\model-api-key`（36 字符 Ark API Key，已由
+`.gitignore` 的 `secrets/` 排除且位于仓库外），启动脚本检测到非空密钥后自动置
+`external_models_enabled=true`。对话模型 `deepseek-v4.1-flash`、向量模型
+`doubao-embedding-vision`（1024 维）。实测 `answer_brain` 返回真实接地回答、
+`search_brain` 语义状态为 `generated` 且含向量命中。不要把密钥写入项目、TRAE
+配置或聊天。启用后，笔记内容和检索问题会发送到火山引擎 Ark 接口。若删除该密钥
+文件并重启，则回到 fail-closed 的"模型未启用"诚实状态。详见
+`docs/acceptance/t197-local-model-2026-09-24.md`。
 
 尚未验证独立备份与恢复，试用阶段请只使用合成内容，不导入不可丢失的个人资料。

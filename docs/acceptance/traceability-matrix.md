@@ -24,6 +24,19 @@ real-client row carries authoritative evidence, and T187 is this task.
 | FR-100..FR-102 human interface | T100-T102 | us12-human-interface.md |
 | FR-103 client rules | T103 | docs/PERSONAL_BRAIN_RULES.md |
 
+## 附录一（2026-09-24）：specs/002-mcp-fixes 特征映射
+
+特征"Ranking Reasons 接线、Trilium 可选部署与本机模型激活"（specs/002-mcp-fixes）登记：
+
+| 特征条目 | 映射目标 | 证据 |
+|---|---|---|
+| FR-001/002/003（排序理由输出与兼容） | ER-03, FR-057/058/061 | tests/unit/test_ranking_reasons.py，tests/contract/test_ranking_contract.py |
+| FR-004/005（Trilium 可选部署） | FR-100, US12 | tests/contract/test_deployment_boundary.py，deploy/compose.yaml（profiles extras） |
+| FR-006/007/008（本机模型激活 + 密钥纪律） | T197, FR-066..FR-070, 宪 IV | tests/unit/test_model_settings.py，docs/acceptance/t197-local-model-2026-09-24.md |
+| SC-001..SC-005 | 对应上述 | 全量回归 447 passed / 0 failed；密钥 git 全历史零命中 |
+
+**任务收口**：002 特征 tasks.md 27/27 勾选；本机运行实例保持独立数据域，局域网不受影响。
+
 ## Task completion ledger
 
 - T001-T170: 170/170 checked.

@@ -26,13 +26,16 @@ Windows 本机试用入口见 [`docs/WINDOWS_LOCAL_TRIAL.md`](docs/WINDOWS_LOCAL
 
 ## Status
 
-Convergence status: **195/197 tasks complete**. The LAN deployment, owner/client
-lifecycle, exact project grants, API/worker/bridge path, restart persistence and
-isolated PostgreSQL regression are verified. T186 remains partially external:
+Convergence status: **195/197 tasks complete** plus feature `002-mcp-fixes`
+(**27/27**): ranking_reasons 接线（ER-03 可解释排序）、Trilium 可选部署
+（compose profile extras，默认关闭不影响核心）、本机真实模型激活
+（T197，`answer_brain` 真实接地 + 向量命中，见
+`docs/acceptance/t197-local-model-2026-09-24.md`）。Full suite now
+**447 passed / 23 skipped / 0 failed**. T186 remains partially external:
 TRAE CN is configured and its bridge path is behaviorally verified, but the
 running IDE still needs a window reload for visible tool discovery; Cursor,
 ChatGPT and real Trilium acceptance remain pending. Do not import real personal
 data until an independent backup destination is approved and restored; see
 `docs/USER_GUIDE.md` and `docs/acceptance/implementation-handoff.md`.
-The Windows-local trial has passed real MCP save/search and isolated PostgreSQL
-regression. T197 awaits a local Ark key file for chat/vector activation.
+The Windows-local trial has passed real MCP save/search, isolated PostgreSQL
+regression and real model grounding.
