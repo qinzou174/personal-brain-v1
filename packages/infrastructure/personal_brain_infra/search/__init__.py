@@ -1,0 +1,1 @@
+"""Full-text and semantic retrieval over the authorized index."""

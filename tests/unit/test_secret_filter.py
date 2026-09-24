@@ -1,0 +1,32 @@
+"""Secret-like filename/type/content detection and value-free results (T032, FR-072)."""
+
+import pytest
+
+
+def test_content_secret_like_values_are_detected_value_free():
+    from personal_brain_domain.security.secret_filter import detect_secret
+
+    result = detect_secret(
+        filename="credentials.txt",
+        content_type="text/plain",
+        content="api_key=sk-live-abc123",
+    )
+    assert result.matched
+    assert "sk-live-abc123" not in repr(result)
+    assert "keychain" in result.rules
+    assert "api_key_literal" in result.rules
+
+
+def test_private_but_ordinary_content_is_not_rejected():
+    from personal_brain_domain.security.secret_filter import detect_secret
+
+    result = detect_secret(filename="note.md", content_type="text/markdown", content="My favorite color is blue.")
+    assert not result.matched
+    assert result.rule_list() == []
+
+
+def test_filename_secret_keywords_alone_can_match():
+    from personal_brain_domain.security.secret_filter import detect_secret
+
+    assert detect_secret(filename="id_rsa", content_type="application/octet-stream", content="plain").matched
+    assert detect_secret(filename=".env", content_type="text/plain", content="x=1").matched

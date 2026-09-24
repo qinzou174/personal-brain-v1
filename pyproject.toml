@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personal-brain-v1"
+version = "0.1.0"
+description = "Private, evidence-grounded Personal Brain V1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "alembic==1.20.0",
+  "argon2-cffi==25.1.0",
+  "cryptography==50.0.1",
+  "fastapi==0.141.1",
+  "httpx==0.28.1",
+  "jieba==0.42.1",
+  "mcp==2.2.0",
+  "pgvector==0.5.0",
+  "psycopg[binary]==3.3.6",
+  "pydantic==2.13.5",
+  "pydantic-settings==2.15.0",
+  "SQLAlchemy==2.0.54",
+  "uvicorn==0.53.0",
+]
+
+[dependency-groups]
+dev = [
+  "hypothesis==6.168.0",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["apps/server", "apps/worker", "apps/bridge", "packages/domain", "packages/infrastructure"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+required-version = ">=0.12.6,<0.13"

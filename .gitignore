@@ -1,0 +1,56 @@
+# Runtime configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+secrets/
+
+# Personal data, generated assets, databases and backups
+data/
+assets/
+backups/
+exports/
+uploads/
+quarantine/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.dump
+*.backup
+
+# Python and generated build/test output
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage/
+
+# Editor, logs and temporary files
+.idea/
+.vscode/
+*.log
+logs/
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local-only ops tooling (embedded LAN credentials / local secrets access)
+deploy/windows-local/fetch_logs.py
+deploy/windows-local/inspect_server_auth.py
+deploy/windows-local/inspect_auth.py

@@ -1,0 +1,9 @@
+Personal Brain V1: full project with Windows-local MCP smoke tooling
+
+Initial commit of the modular-monolith personal knowledge base plus
+Windows-local deployment/MCP smoke tooling and MCP protocol fixes:
+- MCP dispatcher supports ping and answers -32601 for unknown methods
+- self-claim category / review item_type validated against DB enums
+  (structured VALIDATION_FAILED instead of IntegrityError HTTP 500)
+- malformed tool arguments map to VALIDATION_FAILED, not parse error
+- record_decision/record_constraint dedupe replays idempotently

@@ -1,0 +1,13 @@
+# Proposed maintenance schedule (US10) - NOT ACTIVE until Phase 0 approval
+schedule:
+  daily:
+    - backup: "02:00 Asia/Shanghai, single scheduler"
+  weekly:
+    - restore_verification: "Sunday 04:00, after-migration or monthly"
+  monthly:
+    - full_restore: "first Saturday, ER-10 fixture 100% + production samples"
+  after_migration:
+    - restore_verification: "mandatory before serving"
+storage_limits:
+  disk_warn_percent: 15
+  disk_critical_percent: 5
