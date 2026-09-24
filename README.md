@@ -138,7 +138,10 @@ uv run python -m personal_brain_bridge
   挂载一致**，否则迁移步密码认证失败
 - 备份：服务器 `deploy/scripts/prod-backup.sh`（加密打包）→ 本机
   `uv run python deploy/windows-local/pull_backup.py`（异机副本 + sha256 校验）
-- 健康检查：`GET /doctor`（disk/jobs/assets/relations 四组件 + findings）
+- 健康检查：`GET /doctor`（disk/jobs/assets/relations 四组件 + findings）——
+  受 `BRAIN_ENDPOINT_TOKEN_FILE` 门禁：匿名只返回 `{"overall": ...}` 一位聚合，
+  带 token（`prod-data/model-proxy/doctor_token`）返回全量，错误 token 401；
+  `/ready` 同规则；`/health` 保持开放。用法见 `docs/OPERATIONS.md` 顶部
 
 ## MCP 客户端接入
 

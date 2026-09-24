@@ -1,5 +1,17 @@
 # Operations (V1)
 
+- **Ops endpoints gate (2026-09-25)**: `/doctor` and `/ready` are guarded by
+  `BRAIN_ENDPOINT_TOKEN_FILE` (production: `prod-data/secrets/doctor_token`,
+  mounted read-only via the model-proxy directory bind at
+  `/run/model-proxy/doctor_token`). Anonymous callers get only the one-bit
+  aggregate (`{"overall": ...}` / `{"ready": ...}`); the bearer token unlocks
+  the full metrics, wrong tokens get 401. `/health` stays open. Usage:
+
+  ```bash
+  DOCT=$(sudo cat /home/kms/deploy/personal-brain/prod-data/model-proxy/doctor_token)
+  curl -s http://192.168.10.7:18083/doctor -H "Authorization: Bearer $DOCT"
+  ```
+
 - **Health**: per-component states (db/assets/relations/indexes/jobs/backups/
   restore/capacity); failures reported without masking; HTTP stays available.
   The daily `health_check` job raises one inbox notification when dead-letter
