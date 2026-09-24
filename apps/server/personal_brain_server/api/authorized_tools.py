@@ -364,6 +364,10 @@ class AuthorizedToolService:
 
     def create_project(self, *, credential: str, name: str, purpose: str,
                        requested_scope: str, idempotency_key: UUID) -> dict[str, Any]:
+        if not name or not name.strip() or not purpose or not purpose.strip():
+            # An unnamed project cannot be indexed (blank text) or meaningfully
+            # discovered; reject at the boundary instead of orphaning it.
+            raise BrainError("VALIDATION_FAILED")
         context = self._authority.authenticate(credential)
         recheck = lambda: self._authority.authorize(
             context, tool="project.write", scope=requested_scope, sensitivity="private",

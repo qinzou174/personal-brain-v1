@@ -30,6 +30,8 @@ class SearchIndexer:
             entry = self._simple(owner_id, target_id, "todos", "content", "todo")
         elif target_type == "self_claim":
             entry = self._simple(owner_id, target_id, "self_claims", "claim", "self")
+        elif target_type in {"decision", "constraint", "change_event"}:
+            entry = self._fact(owner_id, target_type, target_id)
         elif target_type in {"project", "project_task", "checkpoint", "workspace_observation"}:
             entry = self._project(owner_id, target_type, target_id)
         else:
@@ -88,6 +90,28 @@ class SearchIndexer:
             table_name.rstrip("s"), target_id, scope, row.get("sensitivity", "private"),
             row.get("canonicality", "canonical"), "fresh", row[text_column],
             [f"{table_name.rstrip('s')}:{target_id}"] + ([f"raw_input:{row['source_id']}"] if row.get("source_id") else []),
+        )
+
+    def _fact(self, owner_id: UUID, target_type: str, target_id: UUID) -> dict[str, Any]:
+        """Index a project fact (decision/constraint/change_event) into its
+        project scope — record_project_fact enqueues a refresh job with this
+        payload_ref, and the indexer used to reject it as unknown."""
+        table = self._tables[{"decision": "decisions", "constraint": "constraints",
+                              "change_event": "change_events"}[target_type]]
+        with self._factory() as session:
+            row = session.execute(sa.select(table).where(
+                table.c.id == target_id, table.c.owner_id == owner_id,
+                table.c.lifecycle_state == "active",
+            )).mappings().one_or_none()
+        if row is None:
+            raise BrainError("NOT_FOUND")
+        text = f"{row['statement']} {row['rationale'] or ''}".strip()
+        if not text:
+            text = target_type  # the embedder rejects blank input
+        return self._entry(
+            target_type, target_id, f"project:{row['project_id']}", "private",
+            "canonical", "fresh", text,
+            [f"{target_type}:{target_id}", f"project:{row['project_id']}"],
         )
 
     def _project(self, owner_id: UUID, target_type: str, target_id: UUID) -> dict[str, Any]:

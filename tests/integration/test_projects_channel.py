@@ -9,11 +9,11 @@ on the projects scope, and there was no way to enumerate projects at all.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from activation_support import build_harness
+from activation_support import build_harness, table_rows
 
 
 @pytest.fixture(scope="module")
@@ -174,6 +174,60 @@ def test_project_deletion_is_gated_then_executable(harness):
     assert rows[0]["lifecycle_state"] == "deleted"
     settled = service.get_deletion_plan(credential=token, plan_id=plan["plan_id"])
     assert settled["execution_state"] == "completed"
+
+
+def test_record_decision_refresh_job_indexes_the_fact(harness):
+    """record_project_fact enqueues a refresh job whose payload_ref the indexer
+    used to reject as unknown (latent until the channel worked)."""
+    from pathlib import Path
+
+    from personal_brain_infra.storage.local import LocalStorage
+    from personal_brain_worker.job_handlers import build_job_handlers
+
+    service, token, provisioned = _service(harness)
+    project_id = service.create_project(
+        credential=token, name="事实索引验证", purpose="refresh jobs must index facts",
+        requested_scope="projects", idempotency_key=uuid4(),
+    )["project_id"]
+    decision = service.record_decision(
+        credential=token, project_id=project_id, statement="以恢复视图为唯一权威",
+        rationale="验收", affected_modules=[], idempotency_key=uuid4(),
+    )
+    ref = f"decision:{decision['decision_id']}"
+    job = [row for row in table_rows(harness, "jobs", job_type="refresh_project_context",
+                                     payload_ref=ref)]
+    assert len(job) >= 1  # the store may enqueue one per authorized stage
+
+    # A single poll claims at most 10 jobs; earlier tests in this module may
+    # have queued more, so drain the queue until this decision's job settles.
+    handlers = build_job_handlers(harness.factory, harness.tables, LocalStorage(
+        Path(harness.data_root) / "fact-assets"))
+    from activation_support import run_pending_jobs
+
+    run_pending_jobs(harness, handlers)
+    cards = table_rows(harness, "search_index_entries", owner_id=UUID(provisioned["owner_id"]))
+    fact_cards = [row for row in cards if row["target_type"] == "decision"
+                  and str(row["target_id"]) == decision["decision_id"]]
+    assert len(fact_cards) == 1
+    assert fact_cards[0]["authorized_scope"] == f"project:{project_id}"
+
+
+def test_create_project_rejects_blank_name_and_purpose(harness):
+    from personal_brain_domain.common.errors import BrainError
+
+    service, token, _provisioned = _service(harness)
+    with pytest.raises(BrainError) as blank:
+        service.create_project(
+            credential=token, name="   ", purpose="x", requested_scope="projects",
+            idempotency_key=uuid4(),
+        )
+    assert blank.value.code == "VALIDATION_FAILED"
+    with pytest.raises(BrainError) as blank_purpose:
+        service.create_project(
+            credential=token, name="x", purpose="", requested_scope="projects",
+            idempotency_key=uuid4(),
+        )
+    assert blank_purpose.value.code == "VALIDATION_FAILED"
 
 
 def _project_rows(harness, project_id):
