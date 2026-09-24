@@ -121,7 +121,11 @@ class SearchIndexer:
                 intake, intake.c.id == raw.c.intake_request_id,
             ).where(raw.c.id == target_id, raw.c.owner_id == owner_id,
                     raw.c.lifecycle_state == "active")).mappings().one_or_none()
-        if row is None or not row["content_text"]:
+        if row is None or not (row["content_text"] or "").strip():
+            # A whitespace-only note has nothing to index (the boundary now
+            # rejects new ones, but historic rows exist): treat it as "no source",
+            # so the job settles as a declared skip instead of dead-lettering on
+            # the embedder's blank-input rejection.
             raise BrainError("NOT_FOUND")
         return self._entry(
             "raw_input", target_id, row["requested_scope"], row["sensitivity"],
