@@ -90,6 +90,27 @@ uv run python deploy/windows-local/pull_backup.py
   4. notify_review 写 notifications 行 + 幂等去重
 - 全量回归：**584 passed / 12 skipped / 0 failed**（批 4 后基线 580 + 新增 4）。
 
-## 生产验证
+## 生产验证（2026-09-25，实测通过）
 
-（部署后补充）
+| 验证项 | 方法 | 结果 |
+|---|---|---|
+| 迁移 0013 | `alembic_version` + `pg_get_constraintdef` | `0013_review_notification_trigger`；CHECK 枚举含 `review_item_pending` |
+| 服务健康 | `GET /doctor`（192.168.10.7:18083） | `overall=healthy`，failed_jobs=0，findings 空 |
+| 通知真正送达 | 手排 `notify_review` 作业指向 open 的 merge_candidate（39eecbb9），生产 worker 真实消费 | notifications 出现真实行：`review_item_pending / channel=inbox / state=delivered / priority=normal / risk=ordinary` |
+| 通知幂等去重 | 第二次手排同 item 投递 | `notification_count=1`，重复作业 succeeded 不翻倍 |
+| 墓碑写门禁 | MCP 真实链路：prod-trial 授权（project-access）→ rotate 刷新凭据 → `start_task` 已删除项目 | 返回 **NOT_FOUND**（store 层门禁拦截；修复前会成功创建任务行复活已删项目） |
+| 死信 | jobs 状态分布 | succeeded 740 / cancelled 9 / **dead_letter 0** |
+
+部署备注：secrets 必须指向 `/home/kms/personal-brain-v1-prod-data/secrets/`（与 db 容器挂载一致）——
+`deploy/compose.prod.yaml` 头注释中的 `<secrets>` 是占位符；曾用旧目录 secrets 部署导致 migrate
+密码认证失败。服务器上另有一套**旧版残留 stack**（`personal-brain-v1` 目录 + 本地 compose.yaml，
+占 18081 端口，数据停在 2026-09-23），未动，处置建议见下。
+
+## 遗留（批 6 后）
+
+| 项 | 说明 | 建议 |
+|---|---|---|
+| 旧版残留 stack 未清理 | `/home/kms/personal-brain-v1`（老目录 + `deploy/compose.yaml`）的 api/worker/db/model-proxy 仍在运行，占 **18081**（zafiro 文档里写的端点）；其库数据停在 2026-09-23；有设备（192.168.10.4）持续 POST /mcp 到它并收到 401 | 与用户确认后 `docker compose -p personal-brain-v1 down`（保留卷），并把 zafiro 文档 §1 端点改为 18083 或隧道地址；两库卷独立，prod 卷是唯一真生产（raw_inputs 127 vs 13，写入到 9-24） |
+| Bridge 离线队列未接线 | `PendingStore` 仍无入口引用（字段契约已对齐） | Bridge 启用时做 |
+| digest 调度不补跨日 | 错过 03:10 窗口的当日摘要不会补算 | 数据量上来后再议 |
+| nginx/隧道实机配置 | `client_max_body_size`、`proxy_read_timeout` 未核实 | 有网络层症状时查 |

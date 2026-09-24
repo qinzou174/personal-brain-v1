@@ -6,9 +6,12 @@
 #
 # Deploy:
 #   cd /home/kms/personal-brain-v1-prod && git pull --ff-only && \
-#     BRAIN_DB_PASSWORD_FILE=<secrets>/db_password BRAIN_DB_DSN_FILE=<secrets>/db_dsn \
-#     BRAIN_TOKEN_PEPPER_FILE=<secrets>/token_pepper BRAIN_MODEL_API_KEY_FILE=<secrets>/model_api_key \
-#     docker compose -f deploy/compose.prod.yaml up -d --build api worker
+#     S=/home/kms/personal-brain-v1-prod-data/secrets && \
+#     BRAIN_DB_PASSWORD_FILE=$S/db_password BRAIN_DB_DSN_FILE=$S/db_dsn \
+#     BRAIN_TOKEN_PEPPER_FILE=$S/token_pepper BRAIN_MODEL_API_KEY_FILE=$S/model_api_key \
+#     docker compose -f deploy/compose.prod.yaml up -d --build api worker migrate
+# (The secrets directory must match the one the db container mounts, otherwise
+# the migrate step fails with a password authentication error.)
 name: personal-brain-v1-prod
 
 services:
