@@ -1181,6 +1181,19 @@ class AuthoritativeStore:
                     index_table.c.target_type == "raw_input",
                     index_table.c.target_id == self._db_id(index_table, "target_id", old_note_id),
                 ))
+            # Race convergence: an index job that read the old source before this
+            # commit can still insert its card afterwards. Queue a trailing index
+            # job for the tombstoned source — it settles as source_gone and the
+            # indexer drops any surviving card (last-writer enforcement).
+            jobs = self.tables["jobs"]
+            session.execute(jobs.insert().values(
+                id=self._db_id(jobs, "id", uuid4()),
+                owner_id=self._db_id(jobs, "owner_id", self.owner_id),
+                client_id=None, job_type="index_raw_input",
+                payload_ref=f"raw_input:{old_note_id}", idempotency_key=None,
+                state="queued", priority=0, attempts=0, max_attempts=5,
+                available_at=now, claim_token=0,
+            ))
 
         outcome = self._commit_record(
             operation="update_note", idempotency_key=idempotency_key, source_text=content,
@@ -2194,6 +2207,16 @@ class AuthoritativeStore:
                         index_table.c.target_type == "raw_input",
                         index_table.c.target_id == old_source_key,
                     ))
+                # Race convergence: trailing index job for the tombstoned source
+                # (same rationale as update_note's supersede step).
+                session.execute(self.tables["jobs"].insert().values(
+                    id=self._db_id(self.tables["jobs"], "id", uuid4()),
+                    owner_id=self._db_id(self.tables["jobs"], "owner_id", self.owner_id),
+                    client_id=None, job_type="index_raw_input",
+                    payload_ref=f"raw_input:{old_source_id}", idempotency_key=None,
+                    state="queued", priority=0, attempts=0, max_attempts=5,
+                    available_at=now, claim_token=0,
+                ))
             session.execute(self.tables["intake_requests"].insert().values(
                 id=self._db_id(self.tables["intake_requests"], "id", intake_id),
                 owner_id=self._db_id(self.tables["intake_requests"], "owner_id", self.owner_id),

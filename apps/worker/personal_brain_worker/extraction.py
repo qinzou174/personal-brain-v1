@@ -170,7 +170,13 @@ def make_extract_handler(
                 derived.c.target_id == raw_id, derived.c.kind == "description",
                 derived.c.derivation_version == EXTRACTION_VERSION,
             )).scalar()
-        if row is None or not row["content_text"]:
+        if row is None:
+            # The raw was tombstoned between enqueue and execution (a correction
+            # or deletion raced the queue, 003 verify 2026-09-25). A missing
+            # source has nothing to extract — settle as a declared skip exactly
+            # like the indexer's source_gone, never as a dead letter.
+            return {"extracted": 0, "dropped": 0, "skipped": "source_gone"}
+        if not row["content_text"]:
             raise JobExecutionError("NOT_FOUND", retryable=False)
         # Decision (b), 2026-09-25: a secret-like note keeps its canonical raw text
         # locally but is never sent to a model provider. The skip is declared (no

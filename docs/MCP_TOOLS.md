@@ -37,9 +37,10 @@ idempotency key; reads are side-effect free.
 - `search_brain` / `search_project` / `get_brain_context` accept optional
   `time_from` / `time_to` (ISO date or datetime): results are filtered by the
   record's own content time (`content_time` card metadata). A bare date means
-  the whole day; cards without a content time are honestly excluded when a
-  range is given. Older cards gain `content_time` via the `rebuild-index`
-  admin command.
+  the whole day; **date boundaries are interpreted as UTC** (cards store their
+  content time in UTC). Cards without a content time are honestly excluded
+  when a range is given. Older cards gain `content_time` via the
+  `rebuild-index` admin command.
 - `answer_brain` (knowledge.read) - permission-filtered retrieval followed by a
   grounded model answer with returned source links
 - `get_entry_content` (search.read on the *entry's own scope*) - fetch-after-

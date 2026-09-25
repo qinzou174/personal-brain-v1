@@ -47,7 +47,7 @@ call("tools/list", {})  # 应返回 37 个工具（2026-09-25 起，含 update_n
 - `list_expense_records` / `get_expense_summary([currency])`
 
 ### 检索问答（高频）
-- `search_brain(query, requested_scope, sensitivity_ceiling="private", limit[, time_from, time_to])` — 混合检索（FTS+向量+排序），返回带 `ranking_reasons`；命中摘录已自动聚焦到匹配位置（前 5 条）；可选 `time_from`/`time_to`（ISO 日期，"2026-09-01" 即整天）按内容时间过滤，无时间戳卡片在给定时诚实排除
+- `search_brain(query, requested_scope, sensitivity_ceiling="private", limit[, time_from, time_to])` — 混合检索（FTS+向量+排序），返回带 `ranking_reasons`；命中摘录已自动聚焦到匹配位置（前 5 条）；可选 `time_from`/`time_to`（ISO 日期，"2026-09-01" 即整天，**日期边界按 UTC 解释**）按内容时间过滤，无时间戳卡片在给定时诚实排除
 - `get_entry_content(entry_id, sensitivity_ceiling="private")` — **fetch-after-search**：按 search_brain 返回的 `entry_id` 取该条目全文。消费检索结果的标配两步：先 search 定位、再 fetch 全文。不存在/超敏感度/源已删一律诚实 `NOT_FOUND`；授权自动落在条目自身 scope（复用 search.read），无需额外授权
 - `answer_brain(query, requested_scope, ...)` — **仅凭库内证据回答**，grounded=True；无证据时明确答"无法确认"
 - `get_brain_context(intent, requested_scope, detail, budget)` — 拿到上下文包（intent 需是真实检索意图词，传 "general" 会空）

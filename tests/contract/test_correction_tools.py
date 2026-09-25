@@ -307,6 +307,87 @@ def test_b_and_c_claims_stay_candidates(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# race convergence: absent source => no card (indexer last-writer enforcement)
+# ---------------------------------------------------------------------------
+
+
+def test_index_job_settles_source_gone_and_drops_surviving_card(tmp_path):
+    """A late index job that read the source before the tombstone committed can
+    insert its card after the tombstone's card-DELETE matched 0 rows. The
+    indexer must enforce "absent source => no card" at the last writer."""
+    from personal_brain_infra.search.indexer import SearchIndexer
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'race.sqlite').as_posix()}")
+    factory, metadata, owner_id, client_id = _harness(engine)
+    store = _store(factory, owner_id, client_id)
+
+    note = store.save_note(content="竞态演练笔记", requested_scope="knowledge", idempotency_key=uuid4())
+    note_id = UUID(note["record_id"])
+    _seed_card(factory, metadata, owner_id, client_id, target_type="raw_input",
+               target_id=note_id, scope="knowledge")
+    # the source is tombstoned (as update_note would) but the card survives —
+    # exactly the post-race state observed in production verification
+    with factory.begin() as session:
+        session.execute(metadata.tables["raw_inputs"].update().where(
+            metadata.tables["raw_inputs"].c.id == note_id,
+        ).values(lifecycle_state="deleted", deleted_at=None))
+
+    indexer = SearchIndexer(factory, metadata.tables)
+    result = indexer.handle({"payload_ref": f"raw_input:{note_id}", "owner_id": str(owner_id),
+                             "job_type": "index_raw_input"})
+
+    assert result["skipped"] == "source_gone" and result["indexed"] is False
+    assert _card_count(factory, metadata, owner_id, "raw_input", note_id) == 0, \
+        "the surviving card must be dropped by the indexer itself"
+    engine.dispose()
+
+
+def test_update_note_queues_trailing_index_job_for_old_note(tmp_path):
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'trailing.sqlite').as_posix()}")
+    factory, metadata, owner_id, client_id = _harness(engine)
+    store = _store(factory, owner_id, client_id)
+
+    old = store.save_note(content="旧的", requested_scope="knowledge", idempotency_key=uuid4())
+    old_id = UUID(old["record_id"])
+    store.update_note(old_note_id=old_id, content="新的", requested_scope="knowledge",
+                      idempotency_key=uuid4())
+    with factory() as session:
+        pending = session.execute(sa.select(metadata.tables["jobs"].c.job_type).where(
+            metadata.tables["jobs"].c.job_type == "index_raw_input",
+            metadata.tables["jobs"].c.payload_ref == f"raw_input:{old_id}",
+            metadata.tables["jobs"].c.state == "queued",
+        )).scalars().all()
+    # two queued jobs reference the tombstoned source: the original save_note
+    # index job plus the trailing convergence job queued by update_note
+    assert len(pending) == 2 and set(pending) == {"index_raw_input"}, \
+        "a trailing job for the tombstoned source converges the card race"
+    engine.dispose()
+
+
+def test_extract_job_skips_tombstoned_source_without_dead_letter(tmp_path):
+    from apps.worker.personal_brain_worker.extraction import make_extract_handler
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'extskip.sqlite').as_posix()}")
+    factory, metadata, owner_id, client_id = _harness(engine)
+    store = _store(factory, owner_id, client_id)
+
+    note = store.save_note(content="将被更正的笔记", requested_scope="knowledge", idempotency_key=uuid4())
+    note_id = UUID(note["record_id"])
+    store.update_note(old_note_id=note_id, content="更正后的笔记", requested_scope="knowledge",
+                      idempotency_key=uuid4())
+
+    # the handler unpacks the evidence table at entry; the source_gone branch
+    # returns before touching it, so a stub table object suffices on sqlite
+    evidence_stub = sa.Table("evidence", sa.MetaData(), sa.Column("id", sa.Uuid, primary_key=True))
+    tables = {**metadata.tables, "evidence": evidence_stub}
+    handler = make_extract_handler(factory, tables, storage=None, gateway=None)
+    result = handler({"payload_ref": f"raw_input:{note_id}", "owner_id": str(owner_id),
+                      "job_type": "extract_raw_input"}, context=None)
+    assert result == {"extracted": 0, "dropped": 0, "skipped": "source_gone"}
+    engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # US5 — time-range search plumbing (service-level normalization)
 # ---------------------------------------------------------------------------
 

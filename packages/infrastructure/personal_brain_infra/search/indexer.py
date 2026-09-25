@@ -241,6 +241,21 @@ class SearchIndexer:
             # absent source is *no card*, so settle the job as a declared skip —
             # dead-lettering it would turn every deletion into a health alert.
             # Deletion already removed surviving cards via reconcile_deletion.
+            #
+            # Race convergence (003 verify, 2026-09-25): a late index job may
+            # have read the source *before* the tombstone committed and insert
+            # its card after the tombstone's own card-DELETE matched 0 rows.
+            # The invariant "absent source ⇒ no card" is therefore enforced
+            # HERE, at the last writer, not only inside the tombstone's
+            # transaction: drop any surviving card for this target.
+            index_table = self._tables.get("search_index_entries")
+            if index_table is not None:
+                with self._factory.begin() as session:
+                    session.execute(index_table.delete().where(
+                        index_table.c.owner_id == owner_id,
+                        index_table.c.target_type == target_type,
+                        index_table.c.target_id == target_id,
+                    ))
             return {"target_ref": f"{target_type}:{target_id}", "indexed": False,
                     "skipped": "source_gone"}
         repository = PostgresSearchRepository(
