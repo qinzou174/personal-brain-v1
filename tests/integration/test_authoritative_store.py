@@ -159,6 +159,25 @@ def _schema(engine, *, reject_audit: bool = False):
         sa.Column("expected_version", sa.Integer), *common(),
     )
     sa.Table(
+        "deletion_plans", metadata, sa.Column("id", uuid, primary_key=True),
+        sa.Column("owner_id", uuid, nullable=False),
+        sa.Column("requested_scope", sa.String),
+        sa.Column("requested_targets", sa.JSON, nullable=False), sa.Column("impact_graph", sa.JSON, nullable=False),
+        sa.Column("policy_actions", sa.JSON, nullable=False),
+        sa.Column("backup_implications", sa.JSON, nullable=False), sa.Column("risk", sa.String, nullable=False),
+        sa.Column("confirmation_state", sa.String, nullable=False), sa.Column("confirmation_identity", sa.String),
+        sa.Column("confirmation_time", sa.DateTime(timezone=True)), sa.Column("execution_state", sa.String, nullable=False),
+        sa.Column("reconciliation_state", sa.String, nullable=False), sa.Column("audit_ref", sa.String), *common(),
+    )
+    sa.Table(
+        "deletion_actions", metadata, sa.Column("id", uuid, primary_key=True),
+        sa.Column("owner_id", uuid, nullable=False), sa.Column("plan_id", uuid, nullable=False),
+        sa.Column("target_type", sa.String, nullable=False), sa.Column("target_id", uuid, nullable=False),
+        sa.Column("action", sa.String, nullable=False), sa.Column("produced_purged", sa.Boolean, nullable=False),
+        sa.Column("backup_purge_due", sa.Boolean, nullable=False), sa.Column("performed_at", sa.DateTime(timezone=True)),
+        sa.Column("opaque_deletion_version", sa.Integer, nullable=False), *common(),
+    )
+    sa.Table(
         "asset_blobs", metadata, sa.Column("id", uuid, primary_key=True), sa.Column("owner_id", uuid, nullable=False),
         sa.Column("sha256", sa.String, nullable=False), sa.Column("size_bytes", sa.Integer, nullable=False),
         sa.Column("storage_backend", sa.String, nullable=False), sa.Column("storage_key", sa.String, nullable=False),
@@ -739,4 +758,33 @@ def test_propose_self_claim_c_creates_confirmation_item_and_resolves(tmp_path):
     claims = store.get_self_context(categories=["value"])["claims"]
     target = next(c for c in claims if c["claim_id"] == str(claim_id))
     assert target["lifecycle_state"] == "active" and target["review"] == "none"
+    engine.dispose()
+
+
+def test_deletion_plan_todos_without_updated_at_column(tmp_path):
+    """B-05 (SIMTEST S-13/批8): the production todos table carries no
+    updated_at column; the tombstone step set updated_at unconditionally, so
+    any deletion plan containing a todo target died with a 500."""
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'tododel.sqlite').as_posix()}")
+    metadata = _schema(engine)
+    metadata.create_all(engine)
+    with engine.begin() as session:
+        session.execute(sa.text("ALTER TABLE todos DROP COLUMN updated_at"))
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    owner_id, client_id = _seed(factory, metadata)
+    store = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
+
+    todo = store.add_todo(content="SIMTEST-20260925-S13 删除演练待办", requested_scope="todo",
+                          idempotency_key=uuid4())
+    todo_id = UUID(todo["todo_id"])
+    res = store.create_deletion_plan(targets=[("todo", todo_id)], dependents={},
+                                     requested_scope="todo", idempotency_key=uuid4())
+    store.resolve_review_item(item_id=UUID(res["review_item_id"]), expected_version=1,
+                              decision="approved", idempotency_key=uuid4())
+    with factory() as session:
+        state = session.scalar(sa.select(metadata.tables["todos"].c.lifecycle_state).where(
+            metadata.tables["todos"].c.id == todo_id))
+    assert state == "deleted"
     engine.dispose()

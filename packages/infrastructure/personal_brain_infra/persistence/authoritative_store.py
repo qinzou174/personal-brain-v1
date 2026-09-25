@@ -699,9 +699,13 @@ class AuthoritativeStore:
             table = self.tables[table_name]
             if "lifecycle_state" not in table.c:
                 continue
-            # Not every canonical table carries deleted_at (e.g. projects);
+            # Not every canonical table carries deleted_at (e.g. projects) —
+            # and production todos carries no updated_at either (B-05: a
+            # deletion plan containing a todo target died with a 500) —
             # tombstone with the columns the table actually declares.
-            tombstone = {"lifecycle_state": "deleted", "updated_at": now}
+            tombstone = {"lifecycle_state": "deleted"}
+            if "updated_at" in table.c:
+                tombstone["updated_at"] = now
             if "deleted_at" in table.c:
                 tombstone["deleted_at"] = now
             session.execute(table.update().where(
