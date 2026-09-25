@@ -20,12 +20,15 @@ _FILENAME_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _CONTENT_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("api_key_literal", re.compile(r"(?i)\b(api[_-]?key|access[_-]?key)\s*[:=]\s*\S{8,}")),
+    # B-04 (SIMTEST S-76): underscore/dash-prefixed names (wifi_password,
+    # db_password, app_secret, secret_key) carry no word boundary directly
+    # before the keyword, so the keyword side accepts an identifier prefix.
+    ("api_key_literal", re.compile(r"(?i)\b[\w.-]*(api|access)[_-]?key\s*[:=]\s*\S{8,}")),
     ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("private_key_block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
     ("bearer_token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}")),
-    ("password_literal", re.compile(r"(?i)\bpassword\s*[:=]\s*\S{8,}")),
-    ("token_literal", re.compile(r"(?i)\b(token|client[_-]?secret)\s*[:=]\s*\S{8,}")),
+    ("password_literal", re.compile(r"(?i)\b[\w.-]*(password|passphrase)[\w.-]*\s*[:=]\s*\S{8,}")),
+    ("token_literal", re.compile(r"(?i)\b[\w.-]*(token|secret)[\w.-]*\s*[:=]\s*\S{8,}")),
 )
 
 
