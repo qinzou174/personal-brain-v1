@@ -194,7 +194,7 @@ def make_digest_handler(
             _index_digest(
                 session_factory, tables["search_index_entries"], embedder, owner_id=owner_id,
                 digest_id=digest_id, scope=scope, sensitivity=sensitivity,
-                text=summary, source_links=source_links,
+                text=summary, source_links=source_links, content_time=moment.isoformat(),
             )
             digests += 1
         context.progress(100, "daily digests committed")
@@ -208,7 +208,7 @@ def make_digest_handler(
 def _index_digest(
     session_factory: Any, index_table: sa.Table, embedder: Any | None, *,
     owner_id: UUID, digest_id: UUID, scope: str, sensitivity: str,
-    text: str, source_links: list[str],
+    text: str, source_links: list[str], content_time: str | None = None,
 ) -> None:
     """Project the digest into retrieval (PostgreSQL deployments only)."""
     with session_factory() as session:
@@ -230,4 +230,5 @@ def _index_digest(
         sensitivity=sensitivity, canonicality="derived", freshness="fresh",
         text=text, source_links=source_links, embedding=embedding,
         vector_model_version=vector_model_version,
+        content_time=content_time,
     )
