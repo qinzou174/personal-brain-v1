@@ -667,12 +667,14 @@ class AuthorizedToolService:
         recheck()
         return result
 
-    def list_review_items(self, *, credential: str, state: str = "open") -> dict[str, Any]:
+    def list_review_items(self, *, credential: str, state: str | None = None) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
         self._authority.authorize(
             context, tool="review.read", scope="review", sensitivity="private",
         )
         store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        # state=None (the MCP default) lists every state: an optional parameter
+        # means "no filter", never a hidden open-only default (B-02).
         result = {"items": store.list_review_items(state=state)}
         self._authority.authorize(
             context, tool="review.read", scope="review", sensitivity="private",

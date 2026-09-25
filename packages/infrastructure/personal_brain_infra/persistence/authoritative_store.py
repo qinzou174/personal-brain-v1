@@ -303,12 +303,42 @@ class AuthoritativeStore:
     ) -> dict[str, Any]:
         review = "pending_confirmation" if policy_class == "C" else "none"
         lifecycle = "candidate"
+
+        def _co_create_confirmation(session: Session, target_id: UUID, _source: UUID, now: datetime) -> None:
+            # B-03: a C-class claim waits for owner confirmation, but nothing
+            # ever created its profile_confirmation item — the loop's consumer
+            # (resolve_review_item approval) existed while the producer did not.
+            # Co-create it in the same transaction; value claims get a 7-day
+            # window instead of the 15-minute gate used for one-shot mutations.
+            if policy_class != "C":
+                return
+            items = self.tables["review_inbox_items"]
+            jobs = self.tables["jobs"]
+            item_id = uuid4()
+            session.execute(items.insert().values(
+                id=self._db_id(items, "id", item_id),
+                owner_id=self._db_id(items, "owner_id", self.owner_id),
+                item_type="profile_confirmation", subject_refs=[str(target_id)],
+                proposal={"kind": "policy_class_c", "category": category, "claim": claim_text},
+                risk="ordinary", evidence=[], state="open", resolver_id=None,
+                resolved_at=None, expires_at=now + timedelta(days=7), expected_version=1,
+            ))
+            session.execute(jobs.insert().values(
+                id=self._db_id(jobs, "id", uuid4()),
+                owner_id=self._db_id(jobs, "owner_id", self.owner_id),
+                client_id=None, job_type="notify_review",
+                payload_ref=f"review_item:{item_id}", idempotency_key=None,
+                state="queued", priority=0, attempts=0, max_attempts=5,
+                available_at=now, claim_token=0,
+            ))
+
         return self._commit_record(
             operation="propose_self_claim", idempotency_key=idempotency_key,
             source_text=claim_text, requested_scope=requested_scope, tool="self.write",
             target_category="self_claim", target_table="self_claims", result_key="claim_id",
             job_type="index_self_claim",
             distinguishing={"category": category, "policy_class": policy_class},
+            side_effect=_co_create_confirmation,
             target_values=lambda _target, source, now: {
                 "category": category, "claim": claim_text, "policy_class": policy_class,
                 "lifecycle_state": lifecycle, "establishment": "explicit",
@@ -739,13 +769,17 @@ class AuthoritativeStore:
             reconciliation_state="queued", updated_at=now,
         ))
 
-    def list_review_items(self, *, state: str = "open") -> list[dict[str, Any]]:
+    def list_review_items(self, *, state: str | None = None) -> list[dict[str, Any]]:
+        """List inbox items; ``state=None`` (the default) returns all states —
+        an optional MCP parameter implies "no filter", not a hidden default."""
         items = self.tables["review_inbox_items"]
         with self._session_factory() as session:
             self._assert_authority(session)
+            conditions = [items.c.owner_id == self._db_id(items, "owner_id", self.owner_id)]
+            if state is not None:
+                conditions.append(items.c.state == state)
             rows = session.execute(sa.select(items).where(
-                items.c.owner_id == self._db_id(items, "owner_id", self.owner_id),
-                items.c.state == state,
+                *conditions,
             ).order_by(items.c.created_at, items.c.id)).mappings().all()
         return [{
             "review_item_id": self._external_id(row["id"]), "item_type": row["item_type"],

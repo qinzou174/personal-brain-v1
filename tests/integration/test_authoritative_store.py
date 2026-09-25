@@ -386,12 +386,15 @@ def test_all_canonical_domains_share_durable_uow_and_operation_status(tmp_path):
     assert restarted.list_todos()[0]["content"] == "完成迁移验证"
     assert restarted.get_project_recovery(UUID(project["project_id"]))["next_step"] == "验收"
     with factory() as session:
-        for name in ("todos", "projects", "self_claims", "review_inbox_items"):
+        for name in ("todos", "projects", "self_claims"):
             assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables[name])) == 1
+        # B-03: the C-class claim now co-creates its profile_confirmation item,
+        # so review_inbox_items holds the explicit create + the co-created one.
+        assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["review_inbox_items"])) == 2
         assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["raw_inputs"])) == 7
         # save_note commits two intake jobs (index + extract); the other six
-        # canonical writes commit one each.
-        assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["jobs"])) == 8
+        # canonical writes commit one each — plus B-03's notify_review job.
+        assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["jobs"])) == 9
         assert session.scalar(sa.select(sa.func.count()).select_from(metadata.tables["audit_events"])) == 7
     engine.dispose()
 
@@ -674,4 +677,66 @@ def test_get_entry_content_returns_full_text_with_honest_absence(tmp_path):
             metadata.tables["raw_inputs"].c.id == raw_id,
         ).values(lifecycle_state="deleted"))
     assert store.get_entry_content(entry_id) is None
+    engine.dispose()
+
+
+def test_list_review_items_without_state_returns_all_states(tmp_path):
+    """B-02: the MCP schema marks `state` optional, which implies "no filter".
+    The old default silently restricted to open-only, so a client could never
+    list all states in one call."""
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'inbox.sqlite').as_posix()}")
+    metadata = _schema(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    owner_id, client_id = _seed(factory, metadata)
+    store = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
+    with factory.begin() as session:
+        items = metadata.tables["review_inbox_items"]
+        session.execute(items.insert().values(
+            id=uuid4(), owner_id=owner_id, item_type="ambiguity", subject_refs=[],
+            proposal={}, risk="ordinary", evidence=[], state="open",
+            resolver_id=None, resolved_at=None, expires_at=None, expected_version=1,
+        ))
+        session.execute(items.insert().values(
+            id=uuid4(), owner_id=owner_id, item_type="conflict", subject_refs=[],
+            proposal={}, risk="ordinary", evidence=[], state="approved",
+            resolver_id=client_id, resolved_at=None, expires_at=None, expected_version=1,
+        ))
+    assert len(store.list_review_items()) == 2, "no state filter = all states"
+    assert len(store.list_review_items(state="open")) == 1
+    assert len(store.list_review_items(state="approved")) == 1
+    engine.dispose()
+
+
+def test_propose_self_claim_c_creates_confirmation_item_and_resolves(tmp_path):
+    """B-03: a C-class claim carries review=pending_confirmation, but nothing
+    ever created its profile_confirmation item — the confirmation loop could
+    never close. Propose must co-create the item; approving it promotes the
+    claim to active."""
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'claimc.sqlite').as_posix()}")
+    metadata = _schema(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    owner_id, client_id = _seed(factory, metadata)
+    store = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
+
+    res = store.propose_self_claim(
+        category="value", claim_text="SIMTEST-20260925-S19 C类重大价值主张：隐私比便利更重要。",
+        policy_class="C", requested_scope="self", idempotency_key=uuid4(),
+    )
+    claim_id = UUID(res["claim_id"])
+    open_items = store.list_review_items(state="open")
+    confirmations = [it for it in open_items if it["item_type"] == "profile_confirmation"]
+    assert len(confirmations) == 1, "propose(C) must co-create the confirmation item"
+    assert claim_id.__str__() in confirmations[0]["subject_refs"]
+
+    store.resolve_review_item(
+        item_id=UUID(confirmations[0]["review_item_id"]), expected_version=1,
+        decision="approved", idempotency_key=uuid4(),
+    )
+    claims = store.get_self_context(categories=["value"])["claims"]
+    target = next(c for c in claims if c["claim_id"] == str(claim_id))
+    assert target["lifecycle_state"] == "active" and target["review"] == "none"
     engine.dispose()
