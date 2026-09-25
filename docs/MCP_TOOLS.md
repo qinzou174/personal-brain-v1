@@ -23,6 +23,11 @@ idempotency key; reads are side-effect free.
 - `get_brain_context`, `search_brain` (context.read / search.read)
 - `answer_brain` (knowledge.read) - permission-filtered retrieval followed by a
   grounded model answer with returned source links
+- `get_entry_content` (search.read on the *entry's own scope*) - fetch-after-
+  search: returns the full source text of one retrieval card. Absence (unknown
+  entry, sensitivity above the ceiling, tombstoned source) is an honest
+  `NOT_FOUND`. Search excerpts are additionally re-centered on the matched
+  region for the top hits.
 - `get_self_context` (self.read)
 
 `search.read` / `context.read` grants are per scope: a client can search or

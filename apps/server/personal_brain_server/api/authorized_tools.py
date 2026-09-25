@@ -12,7 +12,9 @@ from typing import Any, Callable
 from uuid import UUID
 
 from personal_brain_domain.records.expenses import validate_money
+from personal_brain_domain.retrieval.snippets import build_snippet
 from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+from personal_brain_infra.search.repository import SENSITIVITY_ORDER
 from personal_brain_infra.security.authority import PersistedAuthority
 from personal_brain_infra.storage.base import StorageBackend
 from personal_brain_infra.models.gateway import ModelGateway, ProviderCallBudget
@@ -230,8 +232,71 @@ class AuthorizedToolService:
             sensitivity_ceiling=sensitivity_ceiling, query_embedding=query_embedding,
             vector_model_version=vector_model_version, limit=min(max(limit, 1), 50),
         )
-        return {"authority": "hybrid", "query": query, "hits": hits,
+        return {"authority": "hybrid", "query": query,
+                "hits": self._with_snippets(context, query, hits, sensitivity_ceiling),
                 "semantic_status": semantic_status}
+
+    _SNIPPET_HITS = 5
+
+    def _with_snippets(self, context: Any, query: str, hits: list[dict[str, Any]],
+                       sensitivity_ceiling: str) -> list[dict[str, Any]]:
+        """Re-center excerpts on the matched region (top hits only, bounded cost).
+
+        The stored excerpt is the document's first 300 chars, so a match landing
+        deep inside a long record was invisible to consumers (the knowledge
+        base's own「检索粒度的坑」note). Hydration reads the source text for at
+        most the first few hits; any failure keeps the stored excerpt — search
+        must never fail because a snippet could not be built.
+        """
+        if not hits:
+            return hits
+        try:
+            store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+            for hit in hits[:self._SNIPPET_HITS]:
+                try:
+                    entry_id = UUID(str(hit.get("entry_id", "")))
+                except ValueError:
+                    continue
+                try:
+                    content = store.get_entry_content(
+                        entry_id, storage=self._storage, sensitivity_ceiling=sensitivity_ceiling,
+                    )
+                except BrainError:
+                    continue
+                if not content:
+                    continue
+                snippet = build_snippet(content["text"], query)
+                if snippet:
+                    hit["excerpt"] = snippet
+            return hits
+        except BrainError:
+            return hits
+
+    def get_entry_content(self, *, credential: str, entry_id: UUID,
+                          sensitivity_ceiling: str = "private") -> dict[str, Any]:
+        """Fetch-after-search: the full source text of one retrieval card.
+
+        Authorization rides on the ROW's own scope via ``search.read`` — the
+        caller declares nothing, so no client needs re-provisioning and a
+        client without that scope keeps its denial. Absence (unknown entry,
+        sensitivity above the ceiling, tombstoned source) is an honest
+        NOT_FOUND, exactly like the same card missing from a search listing.
+        """
+        if sensitivity_ceiling not in SENSITIVITY_ORDER:
+            raise BrainError("VALIDATION_FAILED")
+        context = self._authority.authenticate(credential)
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        content = store.get_entry_content(
+            entry_id, storage=self._storage, sensitivity_ceiling=sensitivity_ceiling,
+        )
+        if content is None:
+            raise BrainError("NOT_FOUND")
+        recheck = lambda: self._authority.authorize(
+            context, tool="search.read", scope=content["scope"],
+            sensitivity=sensitivity_ceiling,
+        )
+        recheck()
+        return content
 
     def search_brain(
         self, *, credential: str, query: str, requested_scope: str,

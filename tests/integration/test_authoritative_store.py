@@ -209,6 +209,17 @@ def _schema(engine, *, reject_audit: bool = False):
         *common(), sa.UniqueConstraint("client_id", "operation", "idempotency_key"),
     )
     sa.Table(
+        "search_index_entries", metadata, sa.Column("id", uuid, primary_key=True),
+        sa.Column("owner_id", uuid, nullable=False), sa.Column("target_type", sa.String, nullable=False),
+        sa.Column("target_id", uuid, nullable=False), sa.Column("authorized_scope", sa.String, nullable=False),
+        sa.Column("sensitivity", sa.String, nullable=False), sa.Column("canonicality", sa.String, nullable=False),
+        sa.Column("valid_from", sa.DateTime(timezone=True)), sa.Column("valid_to", sa.DateTime(timezone=True)),
+        sa.Column("freshness", sa.String, nullable=False), sa.Column("searchable_text", sa.Text),
+        sa.Column("search_document", sa.Text), sa.Column("embedding", sa.JSON),
+        sa.Column("vector_model_version", sa.String), sa.Column("metadata_filters", sa.JSON),
+        sa.Column("indexed_at", sa.DateTime(timezone=True)),
+    )
+    sa.Table(
         "jobs", metadata, sa.Column("id", uuid, primary_key=True), sa.Column("owner_id", uuid, nullable=False),
         sa.Column("client_id", uuid), sa.Column("job_type", sa.String, nullable=False),
         sa.Column("payload_ref", sa.Text, nullable=False), sa.Column("idempotency_key", uuid),
@@ -593,4 +604,74 @@ def test_asset_bytes_metadata_dedupe_and_job_are_persisted_together(tmp_path):
             generator_version=f"{label}-v1", service=derivations, **kwargs,
         )
         assert storage.read(outcome.result_ref).startswith(label.encode())
+    engine.dispose()
+
+
+def test_get_entry_content_returns_full_text_with_honest_absence(tmp_path):
+    """Fetch-after-search: full source text for an owned, in-ceiling, live
+    entry; honest None for unknown, beyond-ceiling, superseded and tombstoned
+    cases — mirroring exactly what the search listing would have shown."""
+    from datetime import datetime, timezone
+
+    from personal_brain_infra.persistence.authoritative_store import AuthoritativeStore
+
+    engine = sa.create_engine(f"sqlite+pysqlite:///{(tmp_path / 'entry.sqlite').as_posix()}")
+    metadata = _schema(engine)
+    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
+    owner_id, client_id = _seed(factory, metadata)
+    store = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
+
+    intake_id, raw_id, entry_id = uuid4(), uuid4(), uuid4()
+    full_text = "【结论笔记·需求】「历史上的今天」日常日志设计\n\n一、需求\n用户每天会讲当天经历。" * 12
+    with factory.begin() as session:
+        tables = metadata.tables
+        session.execute(tables["intake_requests"].insert().values(
+            id=intake_id, owner_id=owner_id, client_id=client_id, operation="save_note",
+            idempotency_key=uuid4(), received_at=datetime.now(timezone.utc),
+            requested_scope="knowledge", security_decision="allow", intake_level="ordinary",
+            state="accepted", outcome_refs={}, correlation_id=uuid4(),
+        ))
+        session.execute(tables["raw_inputs"].insert().values(
+            id=raw_id, owner_id=owner_id, intake_request_id=intake_id, client_id=client_id,
+            content_text=full_text, content_hash="0" * 64, source_channel="mcp",
+            retention_policy="keep", sensitivity="personal", information_class="note",
+            canonicality="canonical", source_kind="note", source_id=uuid4(),
+            lifecycle_state="active",
+        ))
+        session.execute(tables["search_index_entries"].insert().values(
+            id=entry_id, owner_id=owner_id, target_type="raw_input", target_id=raw_id,
+            authorized_scope="knowledge", sensitivity="personal", canonicality="canonical",
+            valid_from=datetime.now(timezone.utc), freshness="fresh",
+            searchable_text=full_text, search_document=full_text,
+            metadata_filters={"display_excerpt": full_text[:300], "source_links": [f"raw_input:{raw_id}"]},
+            indexed_at=datetime.now(timezone.utc),
+        ))
+
+    content = store.get_entry_content(entry_id)
+    assert content is not None
+    assert content["text"] == full_text and len(content["text"]) > 300
+    assert content["scope"] == "knowledge" and content["sensitivity"] == "personal"
+    assert content["source_links"] == [f"raw_input:{raw_id}"]
+
+    # above-ceiling entries are honestly absent (same as search filtering)
+    assert store.get_entry_content(entry_id, sensitivity_ceiling="normal") is None
+    # unknown entries are absent
+    assert store.get_entry_content(uuid4()) is None
+
+    # a superseded card (valid_to set) is absent
+    with factory.begin() as session:
+        session.execute(metadata.tables["search_index_entries"].update().where(
+            metadata.tables["search_index_entries"].c.id == entry_id,
+        ).values(valid_to=datetime.now(timezone.utc)))
+    assert store.get_entry_content(entry_id) is None
+
+    # a tombstoned source is absent even though the card row still exists
+    with factory.begin() as session:
+        session.execute(metadata.tables["search_index_entries"].update().where(
+            metadata.tables["search_index_entries"].c.id == entry_id,
+        ).values(valid_to=None))
+        session.execute(metadata.tables["raw_inputs"].update().where(
+            metadata.tables["raw_inputs"].c.id == raw_id,
+        ).values(lifecycle_state="deleted"))
+    assert store.get_entry_content(entry_id) is None
     engine.dispose()

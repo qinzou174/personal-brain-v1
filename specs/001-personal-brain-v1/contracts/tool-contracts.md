@@ -56,6 +56,7 @@ raw stack, query plan, and unrelated path values are forbidden.
 |---|---|---|---|---|
 | `get_brain_context` | `context.read`, requested domain scopes | intent, detail, optional time/project | ContextPackage | compiled authorized evidence |
 | `search_brain` | `search.read`, requested scopes | query, filters, detail, limit | ranked source-linked hits | routed exact/FTS/semantic |
+| `get_entry_content` | `search.read` on the *entry's own scope* | entry_id, sensitivity ceiling | full source text plus metadata | honest `NOT_FOUND` on absence (unknown / above ceiling / tombstoned source) |
 | `get_self_context` | `self.read` | categories, time, detail | active plus relevant history/evidence | explicit statements and evidence policy |
 | `get_expense_summary` | `finance.read` | period, currencies, grouping | exact totals and assumptions | canonical Expense records |
 | `list_todos` | `todo.read` | states, due range, priority | exact Todo records | canonical Todo records |
@@ -74,8 +75,11 @@ context for exactly the content scopes it already holds (`knowledge`, `finance`,
 `asset`, and each explicitly granted `project:<id>`). The grant never widens a client's scope set.
 Exact routing inside `search_brain` (expense totals, todo lists) stays inside the already-authorized
 scope and returns canonical domain records without re-checking a different domain tool, so the
-operation is governed by exactly the tool named above. `answer_brain` remains `knowledge.read`
-because it retrieves evidence and then calls an external model.
+operation is governed by exactly the tool named above. `answer_brain` is governed by `search.read`
+like `search_brain` (retrieval plus a grounded model summary): authorizing it as `knowledge.read`
+denied every scope except knowledge while `search_brain` succeeded (fixed 2026-09-24).
+`get_entry_content` resolves the entry first and then authorizes `search.read` on the row's own
+scope — the caller declares no scope, so authorization can never be widened by request input.
 
 ## Mutation Operations
 

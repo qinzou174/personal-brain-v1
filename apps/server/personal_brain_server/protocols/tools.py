@@ -44,6 +44,10 @@ FR099_TOOL_NAMES = frozenset({
     # D-projects 2026-09-25: creation had no discovery — a client could never
     # enumerate the projects it had built. The surface grows 32 -> 33.
     "list_projects",
+    # AI-consumer readability 2026-09-25: search could find a card but nothing
+    # could read one in full (300-char head excerpt only). The surface grows
+    # 33 -> 34; authorization reuses `search.read` on the entry's own scope.
+    "get_entry_content",
 })
 
 _UUID = {"type": "string", "format": "uuid"}
@@ -142,6 +146,8 @@ _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
                                    item_id=_UUID, expected_version={"type": "integer", "minimum": 1},
                                    decision={"enum": ["approved", "rejected"]}, idempotency_key=_UUID),
     "list_projects": _schema(),
+    "get_entry_content": _schema(("entry_id",), entry_id=_UUID,
+                                 sensitivity_ceiling={"enum": ["normal", "personal", "private", "highly_private"]}),
 }
 
 

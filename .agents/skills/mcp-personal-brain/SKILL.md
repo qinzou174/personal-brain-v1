@@ -33,10 +33,10 @@ call("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                     "clientInfo": {"name": "my-client", "version": "1"}})
 # 响应头 MCP-Session-Id 必须存下来，后续请求带上
 call("notifications/initialized", {}, None)  # 通知完成初始化
-call("tools/list", {})  # 应返回 30 个工具
+call("tools/list", {})  # 应返回 34 个工具（2026-09-25 起，含 get_entry_content）
 ```
 
-## 2. 30 个工具速查（按使用场景分组）
+## 2. 工具速查（34 个，按使用场景分组）
 
 ### 日常记录（高频）
 - `save_note(content, requested_scope="knowledge", idempotency_key)` — 记笔记/日记/知识，原样入库并自动向量化
@@ -45,7 +45,8 @@ call("tools/list", {})  # 应返回 30 个工具
 - `list_expense_records` / `get_expense_summary([currency])`
 
 ### 检索问答（高频）
-- `search_brain(query, requested_scope, sensitivity_ceiling="private", limit)` — 混合检索（FTS+向量+排序），返回带 `ranking_reasons`
+- `search_brain(query, requested_scope, sensitivity_ceiling="private", limit)` — 混合检索（FTS+向量+排序），返回带 `ranking_reasons`；命中摘录已自动聚焦到匹配位置（前 5 条）
+- `get_entry_content(entry_id, sensitivity_ceiling="private")` — **fetch-after-search**：按 search_brain 返回的 `entry_id` 取该条目全文。消费检索结果的标配两步：先 search 定位、再 fetch 全文。不存在/超敏感度/源已删一律诚实 `NOT_FOUND`；授权自动落在条目自身 scope（复用 search.read），无需额外授权
 - `answer_brain(query, requested_scope, ...)` — **仅凭库内证据回答**，grounded=True；无证据时明确答"无法确认"
 - `get_brain_context(intent, requested_scope, detail, budget)` — 拿到上下文包（intent 需是真实检索意图词，传 "general" 会空）
 

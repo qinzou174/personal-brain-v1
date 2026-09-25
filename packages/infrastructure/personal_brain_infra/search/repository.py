@@ -11,7 +11,8 @@ import sqlalchemy as sa
 from personal_brain_domain.retrieval.ranking import _signal_reasons, rrf_fuse
 from personal_brain_infra.search.tokenization import TOKENIZER_ID, fts_query_text, fts_text
 
-_SENSITIVITY_ORDER = ("normal", "personal", "private", "highly_private")
+SENSITIVITY_ORDER = ("normal", "personal", "private", "highly_private")
+_SENSITIVITY_ORDER = SENSITIVITY_ORDER  # legacy private alias
 
 
 class PostgresSearchRepository:

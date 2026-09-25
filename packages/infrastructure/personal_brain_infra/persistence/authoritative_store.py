@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 from personal_brain_domain.common.errors import BrainError
 from personal_brain_infra.persistence.idempotency import claim_request, complete_claim
 from personal_brain_infra.persistence.unit_of_work import UnitOfWork
+from personal_brain_infra.search.indexer import EntryTextResolver
+from personal_brain_infra.search.repository import SENSITIVITY_ORDER
 from personal_brain_infra.storage.base import StorageBackend
 
 
@@ -1609,6 +1611,54 @@ class AuthoritativeStore:
             "purpose": row["purpose"], "lifecycle_state": row["lifecycle_state"],
             "version": row["version"],
         } for row in rows]}
+
+    def get_entry_content(
+        self, entry_id: UUID, *, storage: StorageBackend | None = None,
+        sensitivity_ceiling: str = "private",
+    ) -> dict[str, Any] | None:
+        """Full source text of a retrieval card (the fetch-after-search read).
+
+        Returns None — the same honest absence the search list itself applies —
+        when the entry does not exist for this owner, sits above the caller's
+        sensitivity ceiling, or its source row is gone (tombstoned). The
+        caller's authorization is checked against the *row's own scope* by the
+        service layer; this method stays scope-free by design.
+        """
+        if sensitivity_ceiling not in SENSITIVITY_ORDER:
+            raise BrainError("VALIDATION_FAILED")
+        index_table = self.tables.get("search_index_entries")
+        if index_table is None:
+            raise BrainError("DEPENDENCY_CONFLICT")
+        with self._session_factory() as session:
+            self._assert_authority(session)
+            row = session.execute(sa.select(index_table).where(
+                index_table.c.id == self._db_id(index_table, "id", entry_id),
+                index_table.c.owner_id == self._db_id(index_table, "owner_id", self.owner_id),
+                index_table.c.valid_to.is_(None),
+            )).mappings().one_or_none()
+        if row is None:
+            return None
+        if SENSITIVITY_ORDER.index(row["sensitivity"]) > SENSITIVITY_ORDER.index(sensitivity_ceiling):
+            return None
+        resolver = EntryTextResolver(
+            self._session_factory, self.tables, storage=storage, id_converter=self._db_id,
+        )
+        try:
+            # normalize the reflected target_id (native UUID on PG, hex str on
+            # sqlite) before the dialect-aware comparison
+            target_id = row["target_id"] if isinstance(row["target_id"], UUID) else UUID(str(row["target_id"]))
+            entry = resolver.resolve(self.owner_id, row["target_type"], target_id)
+        except BrainError as error:
+            if error.code != "NOT_FOUND":
+                raise
+            return None
+        return {
+            "entry_id": str(entry_id), "target_type": row["target_type"],
+            "target_id": self._external_id(row["target_id"]),
+            "scope": row["authorized_scope"], "sensitivity": row["sensitivity"],
+            "canonicality": row["canonicality"], "freshness": row["freshness"],
+            "text": entry["text"], "source_links": list(entry["source_links"]),
+        }
 
     def get_project_recovery(self, project_id: UUID) -> dict[str, Any]:
         projects, tasks, checkpoints = (
