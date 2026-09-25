@@ -66,7 +66,11 @@ class AuthorizedToolService:
         self._authority.authorize(
             context, tool="finance.write", scope=requested_scope, sensitivity="private",
         )
-        money = validate_money(Decimal(amount), currency=currency, kind="expense")
+        try:
+            money = validate_money(Decimal(amount), currency=currency, kind="expense")
+        except ArithmeticError as error:
+            # a non-numeric amount string is client input, not a server fault
+            raise BrainError("VALIDATION_FAILED") from error
         store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
         result = store.add_expense(
             amount=f"{money.amount:.4f}",

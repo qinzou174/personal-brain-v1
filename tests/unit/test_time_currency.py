@@ -6,21 +6,40 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from personal_brain_domain.common.errors import BrainError
+
+
+def _assert_validation_failed(excinfo) -> None:
+    """Boundary violations must be stable in-band VALIDATION_FAILED errors —
+    a bare ValueError leaks into the HTTP layer as -32700 parse error with a
+    lost request id (B-01, SIMTEST S-13)."""
+    assert isinstance(excinfo.value, BrainError)
+    assert excinfo.value.code == "VALIDATION_FAILED"
+
 
 @pytest.mark.parametrize("amount", ["0.0000", "-0.0001", "1.00001", "10000000000000000.0000"])
 def test_amount_rejects_zero_negative_excess_scale_or_precision(amount):
     from personal_brain_domain.records.expenses import validate_money
 
-    with pytest.raises(ValueError):
+    with pytest.raises(BrainError) as excinfo:
         validate_money(Decimal(amount), currency="CNY", kind="expense")
+    _assert_validation_failed(excinfo)
 
 
-@pytest.mark.parametrize("amount", [Decimal("NaN"), Decimal("Infinity"), 0.1])
-def test_non_finite_or_binary_float_money_is_rejected(amount):
+@pytest.mark.parametrize("amount", [Decimal("NaN"), Decimal("Infinity")])
+def test_non_finite_money_is_rejected(amount):
     from personal_brain_domain.records.expenses import validate_money
 
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(BrainError) as excinfo:
         validate_money(amount, currency="CNY", kind="expense")
+    _assert_validation_failed(excinfo)
+
+
+def test_binary_float_money_stays_a_type_error():
+    from personal_brain_domain.records.expenses import validate_money
+
+    with pytest.raises(TypeError):
+        validate_money(0.1, currency="CNY", kind="expense")
 
 
 @pytest.mark.parametrize("amount", ["0.0001", "1.0000", "9999999999999999.9999"])
@@ -34,8 +53,9 @@ def test_amount_accepts_numeric_20_4_positive_edges(amount):
 def test_currency_must_be_explicit_three_letter_code(currency):
     from personal_brain_domain.records.expenses import validate_money
 
-    with pytest.raises(ValueError):
+    with pytest.raises(BrainError) as excinfo:
         validate_money(Decimal("1.0000"), currency=currency, kind="expense")
+    _assert_validation_failed(excinfo)
 
 
 def test_missing_currency_routes_to_review_unless_owner_default_is_configured():

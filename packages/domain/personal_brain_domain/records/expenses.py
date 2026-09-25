@@ -44,17 +44,23 @@ class AdmittedExpense:
 
 
 def validate_money(amount, *, currency, kind="expense") -> Money:
-    """Validate exact money; Decimal required, positive for expense/refund."""
+    """Validate exact money; Decimal required, positive for expense/refund.
+
+    Boundary violations raise the stable in-band ``VALIDATION_FAILED`` (not a
+    bare ValueError): the HTTP layer maps a leaking ValueError to a -32700
+    transport parse error with a lost request id, which told clients nothing
+    about what was actually wrong (B-01, SIMTEST S-13).
+    """
     if kind not in _KINDS:
-        raise ValueError("unknown expense kind")
+        raise BrainError("VALIDATION_FAILED")
     if not isinstance(currency, str) or not _CURRENCY_RE.match(currency):
-        raise ValueError("currency must be an uppercase ISO-4217 code")
+        raise BrainError("VALIDATION_FAILED")
     if isinstance(amount, float) or not isinstance(amount, Decimal):
         raise TypeError("amount must be a Decimal, not a binary float")
     if not amount.is_finite():
-        raise ValueError("amount must be finite")
+        raise BrainError("VALIDATION_FAILED")
     if -amount.as_tuple().exponent > 4 or amount.as_tuple().exponent > 0:
-        raise ValueError("amount exceeds numeric(20,4) scale")
+        raise BrainError("VALIDATION_FAILED")
     exponent = amount.as_tuple().exponent
     if amount == amount.to_integral_value():
         integer_digits = len(amount.as_tuple().digits)
@@ -62,9 +68,9 @@ def validate_money(amount, *, currency, kind="expense") -> Money:
         digits = amount.as_tuple().digits
         integer_digits = len(digits) + exponent
     if integer_digits > 16:
-        raise ValueError("amount exceeds numeric(20,4) precision")
+        raise BrainError("VALIDATION_FAILED")
     if amount <= 0:
-        raise ValueError("amount must be positive")
+        raise BrainError("VALIDATION_FAILED")
     return Money(amount=amount, currency=currency, kind=kind)
 
 
