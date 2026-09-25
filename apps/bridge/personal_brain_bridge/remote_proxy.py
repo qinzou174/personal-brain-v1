@@ -47,6 +47,12 @@ class RemoteMCPProxy:
     def close(self) -> None:
         self._client.close()
 
+    # Transport failures can surface as httpx.HTTPError, but stale keep-alive
+    # sockets (idle-dropped tunnels) may leak raw OSError/RuntimeError from
+    # httpcore on some platforms. Retry once on a fresh connection — request
+    # bodies are byte-identical, so server-side idempotency keys dedupe writes.
+    _TRANSPORT_ERRORS = (httpx.HTTPError, OSError, RuntimeError)
+
     def handle(self, request: dict) -> dict:
         headers = {
             "Authorization": f"Bearer {self._credential}",
@@ -57,8 +63,11 @@ class RemoteMCPProxy:
             headers["MCP-Session-Id"] = self._session_id
         try:
             response = self._client.post(self._url, json=request, headers=headers)
-        except httpx.HTTPError as error:
-            raise BrainError("BRAIN_UNAVAILABLE") from error
+        except self._TRANSPORT_ERRORS:
+            try:
+                response = self._client.post(self._url, json=request, headers=headers)
+            except self._TRANSPORT_ERRORS as error:
+                raise BrainError("BRAIN_UNAVAILABLE") from error
         if response.status_code == 202:
             return {}
         try:

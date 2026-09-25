@@ -8,6 +8,7 @@ identifiers or private material into protocol responses.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from typing import Any, TextIO
 
@@ -15,6 +16,34 @@ from personal_brain_domain.common.errors import BrainError
 from personal_brain_server.protocols.mcp_dispatcher import MCPDispatcher
 from personal_brain_server.protocols.tools import tool_definitions
 from personal_brain_bridge.remote_proxy import RemoteMCPProxy
+
+
+def sanitize(obj: Any) -> Any:
+    """Make a decoded JSON value safe to re-serialize and forward.
+
+    Windows pipes default to a locale codec with surrogateescape, so a
+    non-UTF-8 client can inject lone surrogates via stdin; httpx then fails to
+    re-encode the request body and the process dies. Replace lone surrogates
+    with U+FFFD and non-finite floats (json accepts NaN/Infinity literals,
+    httpx forbids them) with None — malformed input must degrade, never kill
+    the bridge.
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+        except UnicodeEncodeError:
+            # lone surrogates (surrogateescape artifacts or \uD800 escapes)
+            # re-encode via surrogatepass, then invalid bytes become U+FFFD;
+            # valid surrogate PAIRS (real astral chars) pass strict encode
+            return obj.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+        return obj
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, list):
+        return [sanitize(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: sanitize(value) for key, value in obj.items()}
+    return obj
 
 
 def _initialize_response(request_id: int) -> dict[str, Any]:
@@ -85,18 +114,30 @@ def run_stdio_stream(source: TextIO, output: TextIO, *, authorized_client_id: st
             continue
         request: dict[str, Any] = {}
         try:
-            request = json.loads(line)
+            request = sanitize(json.loads(line))
             if remote_proxy is not None:
-                response_line = json.dumps(remote_proxy.handle(request))
+                response = remote_proxy.handle(request)
+                if "id" not in request:
+                    # JSON-RPC: a notification (no "id") must never receive a
+                    # response line, even when the remote answers 202 with an
+                    # empty body — echoing {} desynchronizes strict clients.
+                    continue
+                if not response:
+                    response = {"jsonrpc": "2.0", "id": request.get("id"),
+                                "error": {"code": -32000, "message": "BRAIN_UNAVAILABLE"}}
+                response_line = json.dumps(sanitize(response))
             else:
                 result = dispatcher.handle(
                     request, credential=authorized_client_id, session_id=session_id,
                 )
                 session_id = result.session_id or session_id
-                response_line = json.dumps(result.payload)
+                response_line = json.dumps(sanitize(result.payload))
         except (json.JSONDecodeError, TypeError):
             response_line = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
         except BrainError as error:
+            if "id" not in request:
+                # a failed notification still gets no response line
+                continue
             code = -32601 if error.code == "NOT_FOUND" else -32000
             response_line = json.dumps({"jsonrpc": "2.0", "id": request.get("id"), "error": {"code": code, "message": error.code}})
         output.write(response_line + "\n")
