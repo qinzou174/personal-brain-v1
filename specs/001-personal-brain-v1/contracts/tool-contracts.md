@@ -86,9 +86,12 @@ scope — the caller declares no scope, so authorization can never be widened by
 | Operation | Required tool/scope | Required input | Canonical effect | Async effect |
 |---|---|---|---|---|
 | `save_note` | `knowledge.write` | content/source/time/sensitivity | RawInput and knowledge identity | extraction/index jobs |
+| `update_note` | `knowledge.write` | old note ID + corrected content (2026-09-25, 003-correction-delete-ux) | new RawInput; old raw tombstoned and its retrieval card removed in the same transaction | extraction/index jobs; response names `superseded_id` |
 | `add_expense` | `finance.write` | exact amount/currency/description/time | RawInput + Expense | optional categorization candidate |
+| `correct_expense` | `finance.write` | expense ID + new amount (2026-09-25, 003-correction-delete-ux) | old expense tombstoned; corrected canonical row (`更正` prefix, version = old + 1); summary counts active rows only | index job for the corrected source; response carries `corrected_from` |
 | `add_todo` | `todo.write` | content/source; optional due/priority | RawInput + Todo | deadline candidate |
 | `complete_todo` | `todo.write` | todo ID/version/completed time | Todo state transition | archive/notification update |
+| `delete_todo` | `todo.write` | todo ID/version (2026-09-25, 003-correction-delete-ux) | Todo tombstone (`lifecycle_state=deleted`); retrieval card removed in the same transaction; double delete → `NOT_FOUND`, stale version → `VERSION_CONFLICT` | index job settles as declared skip |
 | `start_task` | `project.write:<id>` | goal, project, plan, constraints, workspace evidence | active ProjectTask | context/index update |
 | `checkpoint_task` | `project.write:<id>` | task/version, progress, problems, next, verification, workspace evidence | append-only Checkpoint | module/change analysis |
 | `finalize_task` | `project.write:<id>` | task/version, outcome, verification, remaining work | terminal task report | module refresh/change derivation |
@@ -100,6 +103,14 @@ scope — the caller declares no scope, so authorization can never be widened by
 All mutations require an idempotency key. A replay with the same client, operation, key, and
 equivalent payload returns the original outcome. A different payload under the same key returns
 `IDEMPOTENCY_CONFLICT` and creates no new canonical state.
+
+Advisory response fields (2026-09-25, 003-correction-delete-ux; never blocking, never hiding a
+failure): `index_state: "pending"` on card-producing writes (the retrieval card is built by a
+durable job seconds later), `conflict_warning` on `propose_self_claim` (same-category
+opposite-polarity claim exists, shared polarity rule with the nightly `conflict_scan`),
+`duplicate_name_hint` on `create_project` (a live same-name project exists). `resolve_review_item`
+on a non-open item returns the stable `ALREADY_RESOLVED` code — an idempotent state, not a missing
+confirmation.
 
 ## Confirmation-Gated Operations
 
