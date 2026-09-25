@@ -2,87 +2,166 @@
 
 > 建档日期：2026-09-26
 > 状态：**诊断完成，待执行**（用户将于明日换对话框执行）
-> 问题来源：另一个 Trae CN 客户端在「list tools」阶段被挡，连续两次同样报错；对方自述"是 personal-brain 的 OAuth 授权问题"——**该断言已被证伪**。
+> 问题来源：另一个 Trae CN 客户端在「list tools」阶段被挡，连续两次同样报错；对方自述"是 personal-brain 的 OAuth 授权问题"——**该断言已被证伪，定案为 MCP 会话生命周期问题**。
+> 知识库镜像：本档已同步写入 Personal Brain 生产库（save_note，knowledge scope），换会话可用 `search_brain("MCP_SESSION_REQUIRED Trae")` 检索回本档全文。
 
-## 1. 现象
+---
 
-- 知识库服务在线：`192.168.10.7:18083` 端口通，/doctor healthy。
-- 另一个 Trae CN 客户端连 MCP，在 `tools/list` 阶段被拒绝，连续两次同样报错。
-- 对方判断为"OAuth 授权问题"（`AUTH_INVALID`/`SCOPE_DENIED` 之类）。
+## 1. 现象与影响面
 
-## 2. 诊断结论（证据链，已定案）
+- 知识库服务在线：`192.168.10.7:18083` 端口通，`/doctor` healthy（components 全 healthy，failed_jobs=0）。
+- 另一个 Trae CN 客户端连 MCP：**在 `tools/list` 阶段被拒**，连续两次同样报错。
+- 对方自行判断为"personal-brain 的 OAuth 授权问题（token/scope）"，并声明"参数没问题"。
+- 影响面仅该客户端；同一时段 prod-trial 脚本、验证脚本（verify_003 等）全部正常，37 工具可用。
 
-**根因不是 OAuth 授权，而是 MCP Streamable HTTP 会话生命周期问题**：客户端请求通过了 token 认证，但**没有携带 `MCP-Session-Id` 头**（或未先完成 initialize / 带的是已失效会话），服务端按规范返回 `MCP_SESSION_REQUIRED`。
+## 2. 定案结论（一句话）
 
-### 证据 1：服务器日志（192.168.10.4，2026-09-25 16:52–17:05，连续 18 次）
+**不是 OAuth 授权问题，而是 MCP 2025-11-25 Streamable HTTP 的会话生命周期问题**：客户端的请求**通过了 token 认证**（否则是 401 AUTH_INVALID），但**没有携带 `MCP-Session-Id` 请求头**（或未先完成 `initialize`、或携带已失效的会话），服务端按规范返回 `400 MCP_SESSION_REQUIRED`。
+
+判断矩阵（一眼区分三件事）：
+
+| 报错码 | HTTP 状态 | 含义 | 谁的锅 |
+|---|---|---|---|
+| `AUTH_INVALID` / `AUTH_REQUIRED` / `CLIENT_REVOKED` | 401 | 凭据/token 无效或已吊销 | 凭据侧（OAuth 问题） |
+| `ORIGIN_NOT_ALLOWED` | 403 | 请求带 Origin 头且不在白名单 | 服务端配置（浏览器客户端） |
+| `MCP_SESSION_REQUIRED` | 400 | token 有效但缺少/带错会话头 | **客户端会话实现** |
+| `SCOPE_DENIED` | 400 | 工具调用阶段 scope 无授权 | 授权配置 |
+
+本次日志中只出现最后一种之前的所有项都未出现——**直接排除 OAuth**。
+
+## 3. 证据链
+
+### 证据 1：服务器日志（来源 192.168.10.4，2026-09-25 16:52–17:05，连续 18 次）
+
+```text
+WARNING personal_brain.protocol correlation=- mcp rejected status=400 code=MCP_SESSION_REQUIRED method=POST
+INFO:     192.168.10.4:56995 - "POST /mcp HTTP/1.1" 400 Bad Request
+```
+
+- 持续 13 分钟、同一来源、同一错误码 → 固定行为，不是偶发/自愈型。
+- 全程**零** `AUTH_INVALID` / `ORIGIN_NOT_ALLOWED` → token 与 Origin 都过了。
+- 查看命令：`docker logs personal-brain-v1-prod-api-1 --since 30m | grep -E "rejected|400"`（经 `deploy/windows-local/_ssh.py` 的 open_client）。
+
+### 证据 2：对照实验（脚本 `deploy/windows-local/prove_session_required.py`，有效 token 直连生产）
+
+```text
+[A] 有效 Bearer + 无 MCP-Session-Id，直接 tools/list → http 400
+    body: {"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"MCP_SESSION_REQUIRED"}}
+[B] initialize（响应头返回 Mcp-Session-Id）→ notifications/initialized → tools/list 带会话头 → http 200，37 个工具
+```
+
+- 同一 token、同一客户端、仅差一个会话头 → 结果 400 vs 200。**token 有效、卡点在会话**。
+
+### 证据 3：服务端行为符合规范，代码定位
+
+- 传输层（`apps/server/personal_brain_server/protocols/remote.py`）：
+  - L71-72：Origin 非空且不在白名单 → `ORIGIN_NOT_ALLOWED`（空白名单时原生客户端不带 Origin 反而通过）。
+  - L75-79：缺 `Authorization: Bearer` → `AUTH_INVALID`。
+  - L86-87：initialize 之后的所有请求必须带 `MCP-Protocol-Version: 2025-11-25` 头。
+- 会话层（`apps/server/personal_brain_server/protocols/mcp_dispatcher.py`）：
+  - L92：**每个请求**先 `resolve_identity(credential)`（OAuth 认证）→ 过了才有资格谈会话。
+  - L116-119：无 `MCP-Session-Id` 或不在会话表 → `MCP_SESSION_REQUIRED`。
+  - L120-122：会话超过 TTL（12h）→ 移除并 `MCP_SESSION_REQUIRED`。
+  - L128-131：`tools/list` 直接返回 37 工具（**本身不做 scope 校验**，更不存在 SCOPE_DENIED 卡 tools/list 的可能）。
+- 会话容量：`MAX_SESSIONS=512`，超容量淘汰最旧**空闲**会话（L76-78），从不拒绝新连接。
+- 服务端重启会清空内存会话（设计如此，客户端重新 initialize 即可）。
+
+### 证据 4：其他端全部正常（反证服务端无问题）
+
+- prod-trial 脚本 / verify_003_corrections.py（生产复测 18/18）同日全部走通：initialize → notifications/initialized → tools/list（37）→ 各工具。
+- `/doctor` healthy，failed_jobs=0，无 5xx。
+
+## 4. 为什么"连续两次同样报错"
+
+MCP Streamable HTTP 的正确客户端流程是：
 
 ```
-WARNING personal_brain.protocol mcp rejected status=400 code=MCP_SESSION_REQUIRED method=POST
+POST /mcp  initialize                    → 200 + 响应头 Mcp-Session-Id: <sid>
+POST /mcp  notifications/initialized     → 请求头带 MCP-Session-Id: <sid>
+POST /mcp  tools/list                    → 请求头带 MCP-Session-Id: <sid>
 ```
 
-- 全部是 400 `MCP_SESSION_REQUIRED`；**从未出现** `AUTH_INVALID`/`SCOPE_DENIED`。
-- 若真是 OAuth/token 问题，传输层会先返回 401 `AUTH_INVALID`（见 `apps/server/personal_brain_server/protocols/remote.py` 的 `_HTTP_STATUS`）。
+Trae CN 的失败模式：`initialize` 成功（200，拿到 sid），但客户端**没有把 `Mcp-Session-Id` 响应头缓存并重放到后续请求**，或每次连接都不持久化会话 → 每个 `tools/list` 都被 400。13 分钟连续 18 次同错，说明这是其客户端实现的固定缺陷或配置缺失，不是偶发。
 
-### 证据 2：对照实验（`deploy/windows-local/prove_session_required.py`，有效 token 直连生产）
+## 5. 待执行方案（明天二选一，推荐先做 A）
 
-```
-[A] 有效 Bearer + 无 MCP-Session-Id，直接 tools/list → 400 MCP_SESSION_REQUIRED
-[B] 先 initialize（响应头返回 Mcp-Session-Id）→ tools/list 带上会话头 → 200，37 个工具
-```
+### 方案 A：Trae CN 侧修正（正解）
 
-- 同一 token，仅差一个会话头，结果截然不同 → 证明 token 有效、卡点在会话。
-
-### 证据 3：服务端行为符合 MCP 2025-11-25 规范，其他端正常
-
-- `tools/list` 前强制会话：`apps/server/personal_brain_server/protocols/mcp_dispatcher.py` L116-122（`MCP_SESSION_REQUIRED`）。
-- 会话容量 512、TTL 12h；超容量只淘汰最旧空闲会话，不拒绝新连接。
-- 同一时间段 prod-trial 脚本/验证脚本全部正常（37 工具、18/18 复测通过）。
-
-## 3. 为什么"连续两次同样报错"
-
-Trae CN 客户端的典型失败模式：每次请求对（initialize 成功 → 后续 tools/list）中，客户端没有把 `initialize` 响应头的 `Mcp-Session-Id` 缓存并重放到后续请求 → 每个 tools/list 都被 400。持续 13 分钟说明它不是"重启一次能自愈"的偶发，而是客户端实现/配置层面的固定行为。
-
-## 4. 待执行方案（明天二选一，建议先做 A）
-
-### 方案 A：Trae CN 侧修正（正解，推荐）
-
-1. 确认 Trae CN 的 MCP 接入形态：是 **HTTP(S) Streamable**（URL `https://…/mcp`）还是 **stdio bridge**。
-2. 若为 HTTP Streamable：
-   - 检查其 MCP 客户端是否遵循会话语义——`initialize` 后必须缓存响应头 `Mcp-Session-Id`，并在每个后续请求带 `MCP-Session-Id` 头（注意大小写：请求头 `MCP-Session-Id`）。
-   - 若 Trae CN 用的是自研/定制 MCP 客户端且不支持会话重放，优先换用标准 MCP SDK（官方 TS/Python SDK 会自动处理会话），或用方案 B。
-3. 若对方仍坚持"参数没问题"，把本文档证据 2 的对照实验结果发它，并说明：**同一 token、带会话头即 200**，服务端无可放宽项。
+1. **确认接入形态**：向对方索取 MCP 配置——是 HTTP(S) Streamable（URL 形如 `https://…/mcp` 或 `http://192.168.10.7:18083/mcp`）还是 stdio bridge。
+2. **若是 HTTP Streamable**，逐项核对：
+   - 客户端是否在 `initialize` 后缓存响应头 `Mcp-Session-Id`？
+   - 每个后续请求是否带请求头 `MCP-Session-Id`（注意大小写，HTTP 头不区分大小写但值必须一致）？
+   - 是否发送了 `notifications/initialized`？
+   - 是否在 initialize 之后的请求带 `MCP-Protocol-Version: 2025-11-25`？
+   - 若客户端 SDK 是自研/定制且不支持会话重放 → 换官方 MCP SDK（TS/Python SDK 自动处理会话），或走方案 B。
+3. **给对方的核对话术**（用证据 2）："同一 token，带会话头即 200 返回 37 工具；不带即 400 MCP_SESSION_REQUIRED。服务端无参数可放宽，请在客户端确认会话头重放。"
+4. **留意一个隐藏坑**：若 Trae CN 是通过浏览器内核/iframe 发请求，可能带 `Origin` 头 → 会变 403 ORIGIN_NOT_ALLOWED（本次日志没有出现，说明它没带 Origin，此坑暂不适用；若未来出现 403 再处理）。
 
 ### 方案 B：走 bridge（stdio）模式（兜底）
 
-本项目有现成 stdio bridge，会话在 bridge 内部维护，客户端只需读写 stdin/stdout，无需处理 Streamable HTTP 会话头。之前 Trae 原生通道即以此方式修通。参考：
-- `apps/bridge/personal_brain_bridge/`（`__main__.py` 已修复 UTF-8 编码/通知/死连接三层问题）
-- 配置形态与本地探针见 `deploy/windows-local/bridge_*.py`
+- 本项目有现成 stdio bridge（`apps/bridge/personal_brain_bridge/`），会话在 bridge 进程内维护，客户端只读写 stdin/stdout，**无需处理 Streamable HTTP 会话头**。
+- bridge 已修复三层问题（UTF-8 编码净化、通知不回写、死连接重试），本地探针 `deploy/windows-local/bridge_*.py` 可参考。
+- 若 Trae CN 支持"stdio/命令型 MCP 服务器"配置，用 `uv run python -m personal_brain_bridge`（配好环境变量）即可接入。
 
-### 方案 C（备选，需用户拍板，本次**不**建议做）
+### 方案 C：服务端放宽"无会话放行 tools/list"（备选，**需用户明确拍板才做**）
 
-服务端放宽"无会话放行 `tools/list`"（只读发现）。代价：偏离 MCP 规范、弱化会话安全语义，且与 B-系列历史修复方向相悖。除非 Trae CN 确实无法支持会话且无法走 bridge，否则不做。
+- 代价：偏离 MCP 规范、弱化会话安全语义、与项目"诚实协议"方向相悖。
+- 触发条件：Trae CN 确证无法支持会话重放、也无法走 bridge，且用户同意放宽。
+- 实现位置：`mcp_dispatcher.handle()` 的 L116 前加"tools/list 且带有效 credential 时放行"分支（需加配置开关）。
+- **本次不建议做**，仅记录。
 
-## 5. 关键资源
+## 6. 完整握手规范（对接/排查参考）
+
+### 请求头（客户端 → 服务端）
+
+| 头 | 何时必须 | 示例 |
+|---|---|---|
+| `Authorization: Bearer <credential>` | 所有请求 | `Bearer <opaque credential>` |
+| `MCP-Protocol-Version: 2025-11-25` | initialize 之后的**每个**请求 | `MCP-Protocol-Version: 2025-11-25` |
+| `MCP-Session-Id: <sid>` | initialize 之后的**每个**请求 | 来自 initialize 响应头 |
+| `Content-Type: application/json` | 所有 POST | — |
+| `Origin` | 浏览器客户端 | 空白名单时带 Origin 必被 403 |
+
+### 响应头（服务端 → 客户端）
+
+| 头 | 何时出现 |
+|---|---|
+| `Mcp-Session-Id: <sid>` | 仅 `initialize` 成功响应（新建会话时） |
+| `MCP-Protocol-Version: 2025-11-25` | 所有响应 |
+
+### 会话生命周期
+
+- initialize 成功后会话在**服务端内存**（`MCPDispatcher._sessions`），TTL 12h，容量 512。
+- 服务端重启 → 会话全失 → 客户端必须重新 initialize（收到 `MCP_SESSION_REQUIRED` 的修复动作就是重新 initialize）。
+- 超容量 → 淘汰最旧空闲会话（新请求仍可用）。
+
+## 7. 明天接续 Todo
+
+- [ ] 向 Trae CN 侧索要 MCP 配置：接入形态（HTTP Streamable / stdio bridge）、SDK 或客户端实现、是否走 OAuth 授权码。
+- [ ] 按形态执行：HTTP → 方案 A 核对会话头重放；无法改 → 方案 B bridge。
+- [ ] 复验成功标准：`tools/list` 返回 37 工具；`search_brain` 一次成功；服务器日志不再出现新的 `MCP_SESSION_REQUIRED`（来源 IP 不再出现）。
+- [ ] 若对方坚持"服务端问题"：同屏跑 `deploy/windows-local/prove_session_required.py`，展示 400 vs 200。
+- [ ] 执行完更新本档"状态"行（勿伪造通过）。
+- [ ] 同步更新知识库镜像（update_note 更正本笔记 或 追加新笔记），保持两处一致。
+
+## 8. 关键资源
 
 | 项 | 位置/值 |
 |---|---|
-| 生产服务 | `192.168.10.7:18083`（/doctor healthy，容器 api/worker/model-proxy/db） |
-| 测试凭据 | `E:\Personal-Brain-V1-local\secrets\prod-trial-credential` |
-| 诊断脚本 | `deploy/windows-local/diag_trae_cn_auth.py`（查服务器日志）、`deploy/windows-local/prove_session_required.py`（对照实验） |
-| 服务端会话代码 | `apps/server/personal_brain_server/protocols/mcp_dispatcher.py`、`protocols/remote.py` |
-| 服务器 SSH | `deploy/windows-local/_ssh.py`（open_client）；查看日志：`docker logs personal-brain-v1-prod-api-1 --since 30m` |
-| 既有验收 | `docs/acceptance/correction-delete-ux-2026-09-25.md`（工具面 37，生产复测 18/18） |
+| 生产服务（内网） | `http://192.168.10.7:18083/mcp` |
+| 生产服务（HTTPS 隧道） | `https://www.h2d954063.nyat.app:43086/brain/mcp` |
+| 测试凭据 | `E:\Personal-Brain-V1-local\secrets\prod-trial-credential`（不写入任何 git/日志） |
+| 诊断脚本 1（查日志） | `deploy/windows-local/diag_trae_cn_auth.py` |
+| 诊断脚本 2（对照实验） | `deploy/windows-local/prove_session_required.py` |
+| 服务端会话代码 | `apps/server/personal_brain_server/protocols/mcp_dispatcher.py` |
+| 服务端传输层代码 | `apps/server/personal_brain_server/protocols/remote.py` |
+| 服务器 SSH 工具 | `deploy/windows-local/_ssh.py`（open_client） |
+| 看日志命令 | `docker logs personal-brain-v1-prod-api-1 --since 30m` |
+| 工具面现状 | 37 工具（003-correction-delete-ux 已上线，见 `docs/acceptance/correction-delete-ux-2026-09-25.md`） |
 
-## 6. 明天接续 Todo
+## 9. 红线提醒
 
-- [ ] 向 Trae CN 侧索要其 MCP 配置（URL 形态 / 是否走 OAuth 授权码 / SDK 版本）
-- [ ] 按其形态执行方案 A（会话头重放确认）或方案 B（bridge）
-- [ ] 复验：`tools/list` 返回 37 工具；`search_brain` 一次成功（日志无 MCP_SESSION_REQUIRED）
-- [ ] 若对方仍无法连接，回看本文档证据 2，必要时与对方同屏复现
-- [ ] 执行完成与否，在本档"状态"行更新，勿伪造通过
-
-## 7. 红线提醒
-
-- 服务端会话语义是正确行为，**不要为单客户端放宽**（方案 C 需用户明确拍板才做）。
-- 生产库只读调查先于任何改动；不动权限/凭据。
-- 凭据/密钥不入库、不入对话产物。
+- 服务端会话语义是**正确行为**；方案 C 需用户明确拍板才做，不为单客户端放宽。
+- 生产库只读调查先于任何改动；不动权限、凭据、不 bump epoch。
+- 凭据/密钥绝不入库、不入对话产物、不进日志。
+- 交接执行以证据为准：对方说"参数没问题"时，用对照实验说话，不盲从断言。
