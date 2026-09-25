@@ -1,0 +1,4 @@
+{
+ "code": "SCOPE_DENIED",
+ "message": "The requested scope is not permitted."
+}
