@@ -41,7 +41,9 @@ def test_full_fr099_surface_has_closed_noncredential_input_schemas():
     # (list_review_items / resolve_review_item), so the governance loop closes.
     # 32 -> 33: list_projects adds discovery to the projects channel.
     # 33 -> 34: get_entry_content closes "found but not readable" for AI clients.
-    assert len(definitions) == 34
+    # 34 -> 37 (003-correction-delete-ux): update_note / delete_todo /
+    # correct_expense — written data becomes correctable and removable.
+    assert len(definitions) == 37
     for definition in definitions.values():
         schema = definition["inputSchema"]
         assert schema["type"] == "object" and schema["additionalProperties"] is False

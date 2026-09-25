@@ -159,12 +159,15 @@ class PersistedAuthority:
             scopes = set(client["scopes"])
             scopes.add(scope)
             tools = set(client["allowed_tools"])
-            tools.update({"project.read", "project.write"})
+            # review.write closes the governance gap: without it the creator
+            # could not open a deletion plan for their own project
+            # (create_deletion_plan requires review.write@project:<id>).
+            tools.update({"project.read", "project.write", "review.write"})
             # No permission-epoch bump here on purpose: the grant is additive and
             # is read live on every request, so bumping would invalidate the very
             # OAuth token that just created the project (the token burns the epoch
             # it was issued with) — and buy nothing in return.
-            for tool in ("project.read", "project.write"):
+            for tool in ("project.read", "project.write", "review.write"):
                 exists = session.scalar(sa.select(self._grants.c.id).where(
                     self._grants.c.client_id == context.client_id,
                     self._grants.c.effect == "allow",
@@ -194,7 +197,7 @@ class PersistedAuthority:
                     outcome="completed", error_code=None, duration_ms=0, occurred_at=moment,
                     risk="broad_permission_change", authorization_decision="creator_self_service",
                 ))
-        return {"scope": scope, "tools": ["project.read", "project.write"]}
+        return {"scope": scope, "tools": ["project.read", "project.write", "review.write"]}
 
 
 class AuthorizationPipeline:

@@ -48,6 +48,11 @@ FR099_TOOL_NAMES = frozenset({
     # could read one in full (300-char head excerpt only). The surface grows
     # 33 -> 34; authorization reuses `search.read` on the entry's own scope.
     "get_entry_content",
+    # Correction/delete UX 2026-09-25 (003-correction-delete-ux): data the user
+    # wrote must be correctable and removable — note supersede (update_note),
+    # todo delete (delete_todo), expense correction (correct_expense). The
+    # surface grows 34 -> 37.
+    "update_note", "delete_todo", "correct_expense",
 })
 
 _UUID = {"type": "string", "format": "uuid"}
@@ -63,11 +68,13 @@ def _schema(required: tuple[str, ...] = (), **properties: object) -> dict[str, o
 
 _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
     "get_brain_context": _schema(("intent", "requested_scope"), intent=_TEXT, requested_scope=_TEXT,
-                                 detail={"enum": ["summary", "normal", "deep"]}, budget={"type": "integer"}),
+                                 detail={"enum": ["summary", "normal", "deep"]}, budget={"type": "integer"},
+                                 time_from={"type": "string"}, time_to={"type": "string"}),
     "search_brain": _schema(("query", "requested_scope"), query=_TEXT, requested_scope=_TEXT,
                             sensitivity_ceiling={"enum": ["normal", "personal", "private", "highly_private"]},
                             query_embedding={"type": "array", "items": {"type": "number"}},
-                            vector_model_version={"type": "string"}, limit={"type": "integer"}),
+                            vector_model_version={"type": "string"}, limit={"type": "integer"},
+                            time_from={"type": "string"}, time_to={"type": "string"}),
     "answer_brain": _schema(("query", "requested_scope"), query=_TEXT, requested_scope=_TEXT,
                              sensitivity_ceiling={"enum": ["normal", "personal", "private", "highly_private"]},
                              limit={"type": "integer", "minimum": 1, "maximum": 20}),
@@ -79,7 +86,8 @@ _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
     "get_module_context": _schema(("project_id", "module_name"), project_id=_UUID, module_name=_TEXT),
     "search_project": _schema(("project_id", "query"), project_id=_UUID, query=_TEXT,
                               sensitivity_ceiling={"type": "string"}, query_embedding={"type": "array", "items": {"type": "number"}},
-                              vector_model_version={"type": "string"}, limit={"type": "integer"}),
+                              vector_model_version={"type": "string"}, limit={"type": "integer"},
+                              time_from={"type": "string"}, time_to={"type": "string"}),
     "get_active_task": _schema(("project_id",), project_id=_UUID),
     "get_recent_changes": _schema(("project_id",), project_id=_UUID),
     "check_freshness": _schema(("project_id",), project_id=_UUID),
@@ -92,6 +100,13 @@ _TOOL_SCHEMAS: Mapping[str, dict[str, object]] = {
                          idempotency_key=_UUID, priority={"type": "integer"}),
     "complete_todo": _schema(("todo_id", "expected_version", "idempotency_key"), todo_id=_UUID,
                               expected_version={"type": "integer", "minimum": 1}, idempotency_key=_UUID, requested_scope=_TEXT),
+    "delete_todo": _schema(("todo_id", "expected_version", "idempotency_key"), todo_id=_UUID,
+                           expected_version={"type": "integer", "minimum": 1}, idempotency_key=_UUID,
+                           requested_scope=_TEXT),
+    "update_note": _schema(("old_note_id", "content", "requested_scope", "idempotency_key"),
+                           old_note_id=_UUID, content=_TEXT, requested_scope=_TEXT, idempotency_key=_UUID),
+    "correct_expense": _schema(("expense_id", "new_amount", "requested_scope", "idempotency_key"),
+                               expense_id=_UUID, new_amount=_TEXT, requested_scope=_TEXT, idempotency_key=_UUID),
     "create_project": _schema(("name", "purpose", "requested_scope", "idempotency_key"), name=_TEXT, purpose=_TEXT,
                               requested_scope=_TEXT, idempotency_key=_UUID),
     "start_task": _schema(("project_id", "goal", "revision", "dirty_state", "constraints", "idempotency_key"),

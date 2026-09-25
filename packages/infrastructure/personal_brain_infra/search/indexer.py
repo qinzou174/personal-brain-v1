@@ -82,6 +82,7 @@ class EntryTextResolver:
             "derived_content", target_id, "asset", row.get("sensitivity", "normal"),
             "derived", "fresh", text,
             [f"derived_content:{target_id}", f"asset:{row['source_id']}"],
+            content_time=self._iso(row.get("created_at")),
         )
 
     def _raw_input(self, owner_id: UUID, target_id: UUID) -> dict[str, Any]:
@@ -101,6 +102,7 @@ class EntryTextResolver:
         return self._entry(
             "raw_input", target_id, row["requested_scope"], row["sensitivity"],
             row["canonicality"], "fresh", row["content_text"], [f"raw_input:{target_id}"],
+            content_time=self._iso(row["original_at"]),
         )
 
     def _simple(self, owner_id: UUID, target_id: UUID, table_name: str,
@@ -118,6 +120,7 @@ class EntryTextResolver:
             table_name.rstrip("s"), target_id, scope, row.get("sensitivity", "private"),
             row.get("canonicality", "canonical"), "fresh", row[text_column],
             [f"{table_name.rstrip('s')}:{target_id}"] + ([f"raw_input:{row['source_id']}"] if row.get("source_id") else []),
+            content_time=self._iso(row.get("created_at")),
         )
 
     def _fact(self, owner_id: UUID, target_type: str, target_id: UUID) -> dict[str, Any]:
@@ -141,6 +144,7 @@ class EntryTextResolver:
             target_type, target_id, f"project:{row['project_id']}", "private",
             "canonical", "fresh", text,
             [f"{target_type}:{target_id}", f"project:{row['project_id']}"],
+            content_time=self._iso(row.get("created_at")),
         )
 
     def _project(self, owner_id: UUID, target_type: str, target_id: UUID) -> dict[str, Any]:
@@ -185,16 +189,28 @@ class EntryTextResolver:
         return self._entry(
             target_type, target_id, f"project:{project_id}", "private", "canonical",
             "fresh", text, [f"{target_type}:{target_id}"],
+            content_time=self._iso(row.get("created_at")),
         )
+
+    @staticmethod
+    def _iso(value: Any) -> str | None:
+        """The record's own time as an ISO string (None when unknowable)."""
+        if value is None:
+            return None
+        try:
+            return value.isoformat()
+        except AttributeError:
+            return None
 
     @staticmethod
     def _entry(target_type: str, target_id: UUID, scope: str, sensitivity: str,
                canonicality: str, freshness: str, text: str,
-               sources: list[str]) -> dict[str, Any]:
+               sources: list[str], content_time: str | None = None) -> dict[str, Any]:
         return {
             "target_type": target_type, "target_id": target_id, "authorized_scope": scope,
             "sensitivity": sensitivity, "canonicality": canonicality,
             "freshness": freshness, "text": text, "source_links": sources,
+            "content_time": content_time,
         }
 
 

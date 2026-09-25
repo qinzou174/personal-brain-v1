@@ -7,6 +7,8 @@ neither a caller-selected client id nor caller-supplied permission grants.
 from __future__ import annotations
 
 import hashlib
+import re
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable
 from uuid import UUID
@@ -161,6 +163,58 @@ class AuthorizedToolService:
         recheck()
         return result
 
+    def update_note(self, *, credential: str, old_note_id: UUID, content: str,
+                    requested_scope: str, idempotency_key: UUID) -> dict[str, Any]:
+        if not content or not content.strip():
+            raise BrainError("VALIDATION_FAILED")
+        context = self._authority.authenticate(credential)
+        recheck = lambda: self._authority.authorize(
+            context, tool="knowledge.write", scope=requested_scope, sensitivity="private",
+        )
+        recheck()
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        result = store.update_note(
+            old_note_id=old_note_id, content=content, requested_scope=requested_scope,
+            idempotency_key=idempotency_key, pre_commit=recheck,
+        )
+        recheck()
+        return result
+
+    def delete_todo(self, *, credential: str, todo_id: UUID, expected_version: int,
+                    idempotency_key: UUID, requested_scope: str = "todo") -> dict[str, Any]:
+        context = self._authority.authenticate(credential)
+        recheck = lambda: self._authority.authorize(
+            context, tool="todo.write", scope=requested_scope, sensitivity="private",
+        )
+        recheck()
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        result = store.delete_todo(
+            todo_id=todo_id, expected_version=expected_version,
+            idempotency_key=idempotency_key, pre_commit=recheck,
+        )
+        recheck()
+        return result
+
+    def correct_expense(self, *, credential: str, expense_id: UUID, new_amount: str,
+                        requested_scope: str, idempotency_key: UUID) -> dict[str, Any]:
+        context = self._authority.authenticate(credential)
+        recheck = lambda: self._authority.authorize(
+            context, tool="finance.write", scope=requested_scope, sensitivity="private",
+        )
+        recheck()
+        try:
+            amount = Decimal(str(new_amount).strip())
+        except ArithmeticError as error:
+            # a non-numeric amount string is client input, not a server fault
+            raise BrainError("VALIDATION_FAILED") from error
+        store = self._store_factory(owner_id=context.owner_id, client_id=context.client_id)
+        result = store.correct_expense(
+            expense_id=expense_id, new_amount=amount, requested_scope=requested_scope,
+            idempotency_key=idempotency_key, pre_commit=recheck,
+        )
+        recheck()
+        return result
+
     def list_expense_records(self, *, credential: str,
                              requested_scope: str = "finance") -> dict[str, Any]:
         context = self._authority.authenticate(credential)
@@ -200,10 +254,32 @@ class AuthorizedToolService:
         self._authority.authorize(context, tool="self.read", scope=requested_scope, sensitivity="private")
         return result
 
+    @staticmethod
+    def _normalize_time_bound(value: str | None, *, end: bool) -> str | None:
+        """Normalize a user time bound into an ISO instant for card filtering.
+
+        A bare date ("2026-09-25") means the whole day: start-of-day for a
+        lower bound, end-of-day for an upper one. Anything else must be a
+        parseable ISO datetime; anything else is client input error.
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                return f"{text}T23:59:59.999999" if end else f"{text}T00:00:00"
+            datetime.fromisoformat(text)
+        except ValueError as error:
+            raise BrainError("VALIDATION_FAILED") from error
+        return text
+
     def _search_core(
         self, context: Any, *, query: str, requested_scope: str,
         sensitivity_ceiling: str, query_embedding: list[float] | None,
         vector_model_version: str | None, limit: int,
+        time_from: str | None = None, time_to: str | None = None,
     ) -> dict[str, Any]:
         """Route and execute one already-authorized read over the requested scope.
 
@@ -235,6 +311,8 @@ class AuthorizedToolService:
             query=query, authorized_scope=requested_scope,
             sensitivity_ceiling=sensitivity_ceiling, query_embedding=query_embedding,
             vector_model_version=vector_model_version, limit=min(max(limit, 1), 50),
+            time_from=self._normalize_time_bound(time_from, end=False),
+            time_to=self._normalize_time_bound(time_to, end=True),
         )
         return {"authority": "hybrid", "query": query,
                 "hits": self._with_snippets(context, query, hits, sensitivity_ceiling),
@@ -306,6 +384,7 @@ class AuthorizedToolService:
         self, *, credential: str, query: str, requested_scope: str,
         sensitivity_ceiling: str = "private", query_embedding: list[float] | None = None,
         vector_model_version: str | None = None, limit: int = 20,
+        time_from: str | None = None, time_to: str | None = None,
     ) -> dict[str, Any]:
         context = self._authority.authenticate(credential)
         recheck = lambda: self._authority.authorize(
@@ -317,6 +396,7 @@ class AuthorizedToolService:
             context, query=query, requested_scope=requested_scope,
             sensitivity_ceiling=sensitivity_ceiling, query_embedding=query_embedding,
             vector_model_version=vector_model_version, limit=limit,
+            time_from=time_from, time_to=time_to,
         )
         recheck()
         return result
@@ -374,6 +454,7 @@ class AuthorizedToolService:
         self, *, credential: str, project_id: UUID, query: str,
         sensitivity_ceiling: str = "private", query_embedding: list[float] | None = None,
         vector_model_version: str | None = None, limit: int = 20,
+        time_from: str | None = None, time_to: str | None = None,
     ) -> dict[str, Any]:
         scope = f"project:{project_id}"
         context = self._authority.authenticate(credential)
@@ -386,6 +467,7 @@ class AuthorizedToolService:
             context, query=query, requested_scope=scope,
             sensitivity_ceiling=sensitivity_ceiling, query_embedding=query_embedding,
             vector_model_version=vector_model_version, limit=limit,
+            time_from=time_from, time_to=time_to,
         )
         recheck()
         return result
@@ -393,6 +475,7 @@ class AuthorizedToolService:
     def get_brain_context(
         self, *, credential: str, intent: str, requested_scope: str,
         detail: str = "normal", budget: int = 6000,
+        time_from: str | None = None, time_to: str | None = None,
     ) -> dict[str, Any]:
         ceilings = {"summary": 2000, "normal": 6000, "deep": 12000}
         ceiling = min(budget, ceilings.get(detail, 6000))
@@ -405,6 +488,7 @@ class AuthorizedToolService:
             context, query=intent, requested_scope=requested_scope,
             sensitivity_ceiling="private", query_embedding=None,
             vector_model_version=None, limit=20,
+            time_from=time_from, time_to=time_to,
         )
         if result["authority"] == "exact":
             recheck()
@@ -458,6 +542,21 @@ class AuthorizedToolService:
         grant = getattr(self._authority, "grant_project_scope", None)
         if grant is not None and result.get("project_id"):
             grant(context, project_id=UUID(result["project_id"]))
+        # R7/O-05: same-name advisory hint. Creation is never blocked; the hint
+        # only makes an accidental duplicate project visible at creation time.
+        # Advisory means fail-soft: a legacy store without discovery (or a
+        # transient read error) must never fail the creation itself.
+        try:
+            existing = store.list_projects().get("projects", [])
+        except (BrainError, AttributeError):
+            existing = []
+        same_name = [
+            {"project_id": item["project_id"], "name": item["name"]}
+            for item in existing
+            if item.get("name", "").strip() == name.strip()
+        ]
+        if same_name:
+            result["duplicate_name_hint"] = same_name
         return result
 
     def list_projects(self, *, credential: str) -> dict[str, Any]:

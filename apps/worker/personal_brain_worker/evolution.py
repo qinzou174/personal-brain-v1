@@ -29,34 +29,12 @@ import sqlalchemy as sa
 
 from personal_brain_domain.memory.evidence import PromotionEvidence, assess_b_promotion
 from personal_brain_domain.memory.lifecycle import retention_transition
+from personal_brain_domain.memory.polarity import is_negative, normalize_claim, topic_key
 from personal_brain_domain.operations.retention import apply_retention
 
-NEGATION_MARKERS = ("不再", "再也不", "不", "没", "讨厌", "戒", "拒绝", "放弃")
-_PUNCTUATION = frozenset(
-    "，。！？、；：“”‘’（）《》【】「」…—·,.!?;:'\"()[]{}<>~`@#$%^&*_-+=|\\/ \t\n\r\u3000"
-)
 MAX_PROMOTION_SCAN = 500
 MAX_RETENTION_SCAN = 1000
 MAX_CONFLICT_PAIRS = 200
-
-
-def normalize_claim(text: Any) -> str:
-    """Lowercase and drop whitespace/punctuation so surface form never matters."""
-    return "".join(character for character in str(text or "").lower()
-                   if character not in _PUNCTUATION)
-
-
-def is_negative(text: Any) -> bool:
-    normalized = normalize_claim(text)
-    return any(marker in normalized for marker in NEGATION_MARKERS)
-
-
-def topic_key(text: Any) -> str:
-    """The claim's topic: normalized text without negation markers."""
-    normalized = normalize_claim(text)
-    for marker in NEGATION_MARKERS:
-        normalized = normalized.replace(marker, "")
-    return normalized
 
 
 def _correction_events(row: Mapping[str, Any]) -> list[dict[str, Any]]:

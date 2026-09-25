@@ -528,7 +528,8 @@ def test_review_confirmation_is_durable_owner_bound_versioned_and_single_use(tmp
     with pytest.raises(BrainError) as caught:
         restarted.resolve_review_item(item_id=item_id, expected_version=1, decision="rejected",
                                       idempotency_key=uuid4())
-    assert caught.value.code == "CONFIRMATION_REQUIRED"
+    # O-05/R9: an already-resolved item reports its state idempotently.
+    assert caught.value.code == "ALREADY_RESOLVED"
     engine.dispose()
 
 

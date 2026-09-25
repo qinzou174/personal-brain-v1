@@ -29,6 +29,7 @@ class PostgresSearchRepository:
         sensitivity: str, canonicality: str, freshness: str, text: str,
         source_links: Sequence[str], vector_model_version: str | None = None,
         embedding: Sequence[float] | None = None, warnings: Sequence[str] = (),
+        content_time: str | None = None,
     ) -> str:
         if sensitivity not in _SENSITIVITY_ORDER:
             raise ValueError("secret/unknown sensitivity cannot enter search")
@@ -41,6 +42,10 @@ class PostgresSearchRepository:
             "embedding_dimensions": None if embedding is None else len(embedding),
             "display_excerpt": text[:300],
         }
+        if content_time:
+            # R4/N-04: the record's own time, enabling range-filtered recall
+            # without a per-hit join back to the source table.
+            metadata["content_time"] = content_time
         with self._factory.begin() as session:
             session.execute(self._table.delete().where(
                 self._table.c.owner_id == self.owner_id,
@@ -61,14 +66,24 @@ class PostgresSearchRepository:
         self, *, query: str, authorized_scope: str, sensitivity_ceiling: str,
         query_embedding: Sequence[float] | None = None,
         vector_model_version: str | None = None, limit: int = 20,
+        time_from: str | None = None, time_to: str | None = None,
     ) -> list[dict[str, Any]]:
         allowed = _SENSITIVITY_ORDER[:_SENSITIVITY_ORDER.index(sensitivity_ceiling) + 1]
-        base = (
+        base = [
             self._table.c.owner_id == self.owner_id,
             self._table.c.authorized_scope == authorized_scope,
             self._table.c.sensitivity.in_(allowed),
             self._table.c.valid_to.is_(None),
-        )
+        ]
+        if time_from is not None or time_to is not None:
+            # R4: when a range is requested, cards without a content_time are
+            # honestly excluded — a NULL comparison never matches, so they
+            # cannot masquerade as in-range hits.
+            content_time = self._table.c.metadata_filters.op("->>")("content_time")
+            if time_from is not None:
+                base.append(content_time >= time_from)
+            if time_to is not None:
+                base.append(content_time <= time_to)
         tsquery = sa.func.websearch_to_tsquery("simple", fts_query_text(query))
         # ER-03: RRF is the only cross-list ranking authority, so document length
         # must never scale the *fused* score. RRF scores live in a ~1/60 band

@@ -134,10 +134,11 @@ def test_deletion_loop_create_see_confirm_and_delete(harness):
             if row["job_type"] == "reconcile_deletion"]
     assert service.list_review_items(credential=token)["items"] == []
 
-    # Single use: the same confirmation cannot be replayed.
+    # Single use: the same confirmation cannot be replayed (R9: the
+    # idempotent "already resolved" state).
     with pytest.raises(BrainError) as replay:
         service.resolve_review_item(
             credential=token, item_id=plan["review_item_id"], expected_version=1,
             decision="approved", idempotency_key=uuid4(),
         )
-    assert replay.value.code == "CONFIRMATION_REQUIRED"
+    assert replay.value.code == "ALREADY_RESOLVED"

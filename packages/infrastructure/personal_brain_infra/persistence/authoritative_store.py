@@ -20,6 +20,8 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from personal_brain_domain.common.errors import BrainError
+from personal_brain_domain.memory.polarity import is_negative, topic_key
+from personal_brain_domain.records.expenses import validate_money
 from personal_brain_infra.persistence.idempotency import claim_request, complete_claim
 from personal_brain_infra.persistence.unit_of_work import UnitOfWork
 from personal_brain_infra.search.indexer import EntryTextResolver
@@ -228,6 +230,11 @@ class AuthoritativeStore:
                 "status": "accepted", "persistence": "canonical_committed",
                 result_key: str(target_id), "source_id": str(source_id), "operation_id": str(intake_id),
             }
+            if job_type.startswith("index_"):
+                # T010/US4: the retrieval card is built by a durable job seconds
+                # later — say so instead of letting clients search immediately
+                # and conclude the write was lost.
+                outcome["index_state"] = "pending"
             session.execute(
                 intake.update().where(intake.c.id == self._db_id(intake, "id", intake_id))
                 .values(state="completed", outcome_refs=[str(target_id), str(source_id)])
@@ -301,8 +308,32 @@ class AuthoritativeStore:
         self, *, category: str, claim_text: str, policy_class: str,
         requested_scope: str, idempotency_key: UUID, pre_commit: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
+        # R8/O-06: an A-class claim is the owner speaking for themselves — it
+        # takes effect immediately; B/C stay candidates for the promotion loop.
+        lifecycle = "active" if policy_class == "A" else "candidate"
         review = "pending_confirmation" if policy_class == "C" else "none"
-        lifecycle = "candidate"
+
+        # R5/O-04: real-time contradiction hint, evaluated with the SAME shared
+        # polarity rule as the worker's overnight conflict_scan so write-time
+        # and batch-time detection can never disagree. Advisory only — the
+        # write is never blocked and the daily scan stays authoritative.
+        conflict: dict[str, Any] | None = None
+        claims_table = self.tables["self_claims"]
+        with self._session_factory() as session:
+            self._assert_authority(session)
+            existing = session.execute(sa.select(
+                claims_table.c.id, claims_table.c.claim,
+            ).where(
+                claims_table.c.owner_id == self._db_id(claims_table, "owner_id", self.owner_id),
+                claims_table.c.category == category,
+                claims_table.c.lifecycle_state.in_(("active", "candidate")),
+            ).order_by(claims_table.c.created_at, claims_table.c.id)).mappings().all()
+        new_topic = topic_key(claim_text)
+        new_negative = is_negative(claim_text)
+        for row in existing:
+            if topic_key(row["claim"]) == new_topic and is_negative(row["claim"]) != new_negative:
+                conflict = {"claim_id": self._external_id(row["id"]), "claim": row["claim"]}
+                break
 
         def _co_create_confirmation(session: Session, target_id: UUID, _source: UUID, now: datetime) -> None:
             # B-03: a C-class claim waits for owner confirmation, but nothing
@@ -332,7 +363,7 @@ class AuthoritativeStore:
                 available_at=now, claim_token=0,
             ))
 
-        return self._commit_record(
+        outcome = self._commit_record(
             operation="propose_self_claim", idempotency_key=idempotency_key,
             source_text=claim_text, requested_scope=requested_scope, tool="self.write",
             target_category="self_claim", target_table="self_claims", result_key="claim_id",
@@ -349,6 +380,9 @@ class AuthoritativeStore:
             },
             pre_commit=pre_commit,
         )
+        if conflict is not None:
+            outcome["conflict_warning"] = conflict
+        return outcome
 
     def create_review_item(
         self, *, item_type: str, subject_refs: list[str], proposal: dict[str, Any],
@@ -870,7 +904,9 @@ class AuthoritativeStore:
                     uow.commit()
                     return outcome
             if row["state"] != "open":
-                raise BrainError("CONFIRMATION_REQUIRED")
+                # O-05: a resolved item is not a missing confirmation — clients
+                # poll the inbox after a timeout and need the idempotent answer.
+                raise BrainError("ALREADY_RESOLVED")
             if int(row["expected_version"]) != expected_version:
                 raise BrainError("VERSION_CONFLICT")
             session.execute(items.update().where(
@@ -1110,6 +1146,97 @@ class AuthoritativeStore:
             job_type="index_todo", pre_commit=pre_commit, side_effect=transition,
             existing_target_id=todo_id,
         )
+
+    def update_note(
+        self, *, old_note_id: UUID, content: str, requested_scope: str,
+        idempotency_key: UUID, pre_commit: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """R1/O-02: correct a note by superseding it, never by rewriting it.
+
+        The corrected content enters through the ordinary save_note pipeline
+        (new raw row, retrieval card, extraction job) while the old raw row is
+        tombstoned and its retrieval card removed inside the same transaction:
+        retrieval stops serving the wrong content immediately, the archive
+        keeps the original for audit (constitution V), and the response names
+        the superseded record so clients can tell replacement from append.
+        """
+        if not content or not content.strip():
+            raise BrainError("VALIDATION_FAILED")
+        index_table = self.tables.get("search_index_entries")
+
+        def supersede(session: Session, _target: UUID, _source: UUID, now: datetime) -> None:
+            raw = self.tables["raw_inputs"]
+            row = session.execute(sa.select(raw.c.id, raw.c.lifecycle_state).where(
+                raw.c.id == self._db_id(raw, "id", old_note_id),
+                raw.c.owner_id == self._db_id(raw, "owner_id", self.owner_id),
+            )).mappings().one_or_none()
+            if row is None or row["lifecycle_state"] != "active":
+                raise BrainError("NOT_FOUND")
+            session.execute(raw.update().where(raw.c.id == row["id"]).values(
+                lifecycle_state="deleted", deleted_at=now, valid_to=now,
+            ))
+            if index_table is not None:
+                session.execute(index_table.delete().where(
+                    index_table.c.owner_id == self._db_id(index_table, "owner_id", self.owner_id),
+                    index_table.c.target_type == "raw_input",
+                    index_table.c.target_id == self._db_id(index_table, "target_id", old_note_id),
+                ))
+
+        outcome = self._commit_record(
+            operation="update_note", idempotency_key=idempotency_key, source_text=content,
+            requested_scope=requested_scope, tool="knowledge.write", target_category="raw_input",
+            target_table=None, target_values=None, result_key="record_id",
+            job_type="index_raw_input", extra_jobs=("extract_raw_input",), pre_commit=pre_commit,
+            side_effect=supersede,
+        )
+        outcome["superseded_id"] = str(old_note_id)
+        return outcome
+
+    def delete_todo(
+        self, *, todo_id: UUID, expected_version: int, idempotency_key: UUID,
+        pre_commit: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """R2/N-02: a low-risk record gets a direct terminal state.
+
+        Version-bound like complete_todo (stale clients must not delete what
+        they have not seen), tombstoned like governed deletions, and its
+        retrieval card leaves the search view in the same transaction.
+        """
+        todos = self.tables["todos"]
+        index_table = self.tables.get("search_index_entries")
+
+        def tombstone(session: Session, _target: UUID, _source: UUID, now: datetime) -> None:
+            row = session.execute(sa.select(
+                todos.c.id, todos.c.version, todos.c.lifecycle_state,
+            ).where(
+                todos.c.id == self._db_id(todos, "id", todo_id),
+                todos.c.owner_id == self._db_id(todos, "owner_id", self.owner_id),
+            )).mappings().one_or_none()
+            if row is None or row["lifecycle_state"] != "active":
+                # A deleted todo is honestly absent, not a version conflict.
+                raise BrainError("NOT_FOUND")
+            if int(row["version"]) != expected_version:
+                raise BrainError("VERSION_CONFLICT")
+            session.execute(todos.update().where(
+                todos.c.id == row["id"], todos.c.version == expected_version,
+            ).values(lifecycle_state="deleted", deleted_at=now, valid_to=now,
+                     version=expected_version + 1))
+            if index_table is not None:
+                session.execute(index_table.delete().where(
+                    index_table.c.owner_id == self._db_id(index_table, "owner_id", self.owner_id),
+                    index_table.c.target_type == "todo",
+                    index_table.c.target_id == self._db_id(index_table, "target_id", todo_id),
+                ))
+
+        outcome = self._commit_record(
+            operation="delete_todo", idempotency_key=idempotency_key,
+            source_text=f"delete todo {todo_id}", requested_scope="todo", tool="todo.write",
+            target_category="todo", target_table=None, target_values=None, result_key="todo_id",
+            job_type="index_todo", pre_commit=pre_commit, side_effect=tombstone,
+            existing_target_id=todo_id,
+        )
+        outcome["state"] = "deleted"
+        return outcome
 
     def get_expense_summary(self, *, currency: str | None = None) -> dict[str, Any]:
         expenses = self.tables["expenses"]
@@ -1914,21 +2041,16 @@ class AuthoritativeStore:
                 kind="expense",
                 event_id=None,
                 source_id=self._db_id(self.tables["expenses"], "source_id", source_id),
-                sensitivity="normal",
-                information_class="explicit_user_statement",
-                canonicality="canonical",
-                source_kind="explicit_user_statement",
-                valid_from=now,
-                valid_to=None,
-                lifecycle_state="active",
-                deleted_at=None,
+                sensitivity="normal", information_class="explicit_user_statement",
+                canonicality="canonical", source_kind="explicit_user_statement",
+                valid_from=now, valid_to=None, lifecycle_state="active", deleted_at=None,
+                version=1,
             ))
             session.execute(self.tables["jobs"].insert().values(
                 id=self._db_id(self.tables["jobs"], "id", job_id),
                 owner_id=self._db_id(self.tables["jobs"], "owner_id", self.owner_id),
                 client_id=self._db_id(self.tables["jobs"], "client_id", self.client_id),
-                job_type="index_raw_input",
-                payload_ref=f"raw_input:{source_id}",
+                job_type="index_raw_input", payload_ref=f"raw_input:{source_id}",
                 idempotency_key=self._db_id(self.tables["jobs"], "idempotency_key", idempotency_key),
                 state="queued",
                 priority=0,
@@ -1959,6 +2081,7 @@ class AuthoritativeStore:
                 "persistence": "canonical_committed",
                 "expense_id": str(expense_id),
                 "source_id": str(source_id),
+                "index_state": "pending",
             }
             session.execute(
                 self.tables["intake_requests"].update()
@@ -1997,3 +2120,154 @@ class AuthoritativeStore:
                 }
                 for row in rows
             ]
+
+    def correct_expense(
+        self, *, expense_id: UUID, new_amount: Decimal, requested_scope: str,
+        idempotency_key: UUID, pre_commit: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """R3/N-03: "更正为 X" replaces the amount, it is not an adjustment.
+
+        The old expense row is tombstoned and a corrected canonical row enters
+        through the ordinary add_expense shape (new raw source, index job,
+        description prefixed 更正, version = old + 1). The summary aggregates
+        active rows only, so it is correct immediately — no recompute job, no
+        double counting. The old expense's raw source and retrieval card leave
+        the search view in the same transaction.
+        """
+        expenses, raw = self.tables["expenses"], self.tables["raw_inputs"]
+        index_table = self.tables.get("search_index_entries")
+        with self._session_factory() as session:
+            self._assert_authority(session)
+            old = session.execute(sa.select(expenses).where(
+                expenses.c.id == self._db_id(expenses, "id", expense_id),
+                expenses.c.owner_id == self._db_id(expenses, "owner_id", self.owner_id),
+                expenses.c.lifecycle_state == "active",
+            )).mappings().one_or_none()
+        if old is None:
+            raise BrainError("NOT_FOUND")
+        old_version = int(old["version"])
+        money = validate_money(new_amount, currency=old["currency"], kind=old["kind"])
+        corrected_description = f"更正：{old['description']}" if (old["description"] or "").strip() else "更正"
+        source_text = f"{corrected_description} {money.amount:.4f} {money.currency}"
+        now = _utcnow()
+        intake_id, source_id, corrected_id = uuid4(), uuid4(), uuid4()
+        job_id, audit_id, correlation_id = uuid4(), uuid4(), uuid4()
+        digest = _digest({
+            "operation": "correct_expense", "expense_id": str(expense_id),
+            "amount": f"{money.amount:.4f}", "currency": money.currency,
+        })
+        with UnitOfWork(self._session_factory) as uow:
+            session = uow.session
+            self._assert_authority(session)
+            claim = claim_request(
+                session, self.tables["idempotency_records"], owner_id=self.owner_id,
+                client_id=self.client_id, operation="correct_expense",
+                idempotency_key=idempotency_key, payload_digest=digest,
+            )
+            if claim.state == "replay":
+                return dict(claim.outcome or {})
+            if claim.state == "deleted":
+                return {"status": "deleted", "persistence": "tombstone"}
+            if claim.state == "in_progress":
+                raise BrainError("BRAIN_UNAVAILABLE")
+            # Guarded tombstone: the row may have changed since the read, and a
+            # stale client must lose to the guard instead of double-correcting.
+            updated = session.execute(expenses.update().where(
+                expenses.c.id == self._db_id(expenses, "id", expense_id),
+                expenses.c.owner_id == self._db_id(expenses, "owner_id", self.owner_id),
+                expenses.c.lifecycle_state == "active",
+                expenses.c.version == old_version,
+            ).values(lifecycle_state="deleted", deleted_at=now, valid_to=now,
+                     version=old_version + 1))
+            if updated.rowcount != 1:
+                raise BrainError("VERSION_CONFLICT")
+            old_source_id = old["source_id"]
+            if old_source_id is not None:
+                old_source_key = self._db_id(raw, "id", UUID(str(old_source_id)))
+                session.execute(raw.update().where(
+                    raw.c.id == old_source_key,
+                    raw.c.owner_id == self._db_id(raw, "owner_id", self.owner_id),
+                ).values(lifecycle_state="deleted", deleted_at=now, valid_to=now))
+                if index_table is not None:
+                    session.execute(index_table.delete().where(
+                        index_table.c.owner_id == self._db_id(index_table, "owner_id", self.owner_id),
+                        index_table.c.target_type == "raw_input",
+                        index_table.c.target_id == old_source_key,
+                    ))
+            session.execute(self.tables["intake_requests"].insert().values(
+                id=self._db_id(self.tables["intake_requests"], "id", intake_id),
+                owner_id=self._db_id(self.tables["intake_requests"], "owner_id", self.owner_id),
+                client_id=self._db_id(self.tables["intake_requests"], "client_id", self.client_id),
+                operation="correct_expense", idempotency_key=self._db_id(
+                    self.tables["intake_requests"], "idempotency_key", idempotency_key),
+                received_at=now, content_ref=None, detected_intent="finance.expense.correct",
+                declared_intent="finance.expense.correct", requested_scope=requested_scope,
+                security_decision="allow", intake_level="L1", state="processing",
+                outcome_refs=[], correlation_id=self._db_id(
+                    self.tables["intake_requests"], "correlation_id", correlation_id),
+                error_code=None,
+            ))
+            session.execute(raw.insert().values(
+                id=self._db_id(raw, "id", source_id),
+                owner_id=self._db_id(raw, "owner_id", self.owner_id),
+                intake_request_id=self._db_id(raw, "intake_request_id", intake_id),
+                client_id=self._db_id(raw, "client_id", self.client_id),
+                content_text=source_text, asset_ref=None,
+                content_hash=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                original_at=old["occurred_at"], original_timezone=old["occurred_timezone"],
+                source_channel="api", language="zh-CN", retention_policy="canonical",
+                sensitivity="normal", information_class="explicit_user_statement",
+                canonicality="canonical", source_kind="explicit_user_statement",
+                source_id=self._db_id(raw, "source_id", source_id),
+                valid_from=now, valid_to=None, lifecycle_state="active", deleted_at=None,
+            ))
+            session.execute(expenses.insert().values(
+                id=self._db_id(expenses, "id", corrected_id),
+                owner_id=self._db_id(expenses, "owner_id", self.owner_id),
+                amount=money.amount, currency=money.currency,
+                category=old["category"], description=corrected_description,
+                occurred_at=old["occurred_at"], occurred_timezone=old["occurred_timezone"],
+                kind=old["kind"], event_id=None,
+                source_id=self._db_id(expenses, "source_id", source_id),
+                sensitivity="normal", information_class="explicit_user_statement",
+                canonicality="canonical", source_kind="explicit_user_statement",
+                valid_from=now, valid_to=None, lifecycle_state="active", deleted_at=None,
+                version=old_version + 1,
+            ))
+            session.execute(self.tables["jobs"].insert().values(
+                id=self._db_id(self.tables["jobs"], "id", job_id),
+                owner_id=self._db_id(self.tables["jobs"], "owner_id", self.owner_id),
+                client_id=self._db_id(self.tables["jobs"], "client_id", self.client_id),
+                job_type="index_raw_input", payload_ref=f"raw_input:{source_id}",
+                idempotency_key=self._db_id(self.tables["jobs"], "idempotency_key", idempotency_key),
+                state="queued", priority=0, attempts=0, max_attempts=5,
+                available_at=now, claim_token=0,
+            ))
+            session.execute(self.tables["audit_events"].insert().values(
+                id=self._db_id(self.tables["audit_events"], "id", audit_id),
+                owner_id=self._db_id(self.tables["audit_events"], "owner_id", self.owner_id),
+                client_id=self._db_id(self.tables["audit_events"], "client_id", self.client_id),
+                correlation_id=self._db_id(self.tables["audit_events"], "correlation_id", correlation_id),
+                action="correct_expense", tool="finance.write", effective_scope=requested_scope,
+                target_category="expense", target_id=self._db_id(
+                    self.tables["audit_events"], "target_id", corrected_id),
+                outcome="completed", error_code=None, duration_ms=0, occurred_at=now,
+                risk="ordinary", authorization_decision="allow",
+            ))
+            outcome = {
+                "status": "accepted", "persistence": "canonical_committed",
+                "expense_id": str(corrected_id), "corrected_from": str(expense_id),
+                "source_id": str(source_id), "operation_id": str(intake_id),
+                "index_state": "pending",
+            }
+            session.execute(
+                self.tables["intake_requests"].update()
+                .where(self.tables["intake_requests"].c.id == self._db_id(
+                    self.tables["intake_requests"], "id", intake_id))
+                .values(state="completed", outcome_refs=[str(corrected_id), str(source_id)])
+            )
+            complete_claim(session, self.tables["idempotency_records"], claim_id=claim.id, outcome=outcome)
+            if pre_commit is not None:
+                pre_commit()
+            uow.commit()
+        return outcome

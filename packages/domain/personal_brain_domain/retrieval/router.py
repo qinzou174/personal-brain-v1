@@ -27,11 +27,14 @@ _EXPENSE_PATTERNS = (
     re.compile(r"总额|总支出|总开销|总花费|费用汇总|开销"),
     re.compile(r"多少钱|多少元"),
     re.compile(r"花.{0,4}(钱|元|块|¥)"),
+    re.compile(r"买.{0,3}什么|最近.{0,4}(买|花)"),
+    re.compile(r"花销|开支|花费"),
     re.compile(r"expense|money"),
     re.compile(r"total\s+(amount|expense|cost|money|spend\w*)"),
 )
 _TODO_PATTERNS = (
     re.compile(r"待办|任务清单|todo"),
+    re.compile(r"要做的事|该做的事|要办|该办"),
 )
 
 

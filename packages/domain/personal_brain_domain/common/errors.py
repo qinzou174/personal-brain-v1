@@ -11,7 +11,7 @@ STABLE_CODES = frozenset({
     "IDEMPOTENCY_CONFLICT", "CONFIRMATION_REQUIRED", "CONFIRMATION_EXPIRED",
     "STALE_PROJECT_CONTEXT", "SECRET_REJECTED", "PAYLOAD_TOO_LARGE", "ARCHIVE_LIMIT_EXCEEDED",
     "WORKSPACE_BOUNDARY_VIOLATION", "BRAIN_UNAVAILABLE", "JOB_ACCEPTED",
-    "DEPENDENCY_CONFLICT", "INTERNAL_SAFE_ERROR",
+    "DEPENDENCY_CONFLICT", "INTERNAL_SAFE_ERROR", "ALREADY_RESOLVED",
     # Protocol-level rejections kept distinct from credential failures: a denied
     # Origin or a lost MCP session must not push clients into rotating (and thus
     # breaking) a perfectly valid credential.
@@ -46,6 +46,7 @@ _SAFE_MESSAGES = {
     "INTERNAL_SAFE_ERROR": "The operation failed safely.",
     "ORIGIN_NOT_ALLOWED": "This request origin is not allowed.",
     "MCP_SESSION_REQUIRED": "The MCP session is missing or expired; initialize again.",
+    "ALREADY_RESOLVED": "The review item has already been resolved.",
 }
 
 

@@ -232,7 +232,8 @@ def main(argv: list[str] | None = None) -> int:
             "create_review_item", "sync_workspace", "get_project_context",
             "get_module_context", "get_active_task", "get_recent_changes",
             "check_freshness", "record_decision", "record_constraint", "finalize_task",
-            "list_todos", "complete_todo", "list_expense_records", "get_expense_summary",
+            "list_todos", "complete_todo", "delete_todo", "update_note", "correct_expense",
+            "list_expense_records", "get_expense_summary",
             "get_self_context",
             "search_brain", "search_project", "get_brain_context", "answer_brain",
             "upload_asset", "create_deletion_plan", "get_deletion_plan",
@@ -260,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
                     if len(converted["content"]) > 100 * 1024 * 1024:
                         raise BrainError("PAYLOAD_TOO_LARGE")
                 for field in ("project_id", "task_id", "todo_id", "item_id", "source_id", "plan_id",
-                              "entry_id"):
+                              "entry_id", "old_note_id", "expense_id"):
                     if field in converted:
                         import uuid
                         converted[field] = uuid.UUID(converted[field])

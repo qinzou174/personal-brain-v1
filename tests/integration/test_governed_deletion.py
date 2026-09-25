@@ -338,11 +338,12 @@ def test_approved_deletion_executes_dependency_plan_and_enqueues_reconciliation(
     result = store.resolve_review_item(item_id=item_id, expected_version=1, decision="approved",
                                        idempotency_key=uuid4())
 
-    # Rejected/expired guard: second consume impossible.
+    # Rejected/expired guard: second consume impossible (R9: the idempotent
+    # "already resolved" state, not a missing confirmation).
     with pytest.raises(BrainError) as caught:
         store.resolve_review_item(item_id=item_id, expected_version=1, decision="approved",
                                   idempotency_key=uuid4())
-    assert caught.value.code == "CONFIRMATION_REQUIRED"
+    assert caught.value.code == "ALREADY_RESOLVED"
 
     restarted = AuthoritativeStore(factory, owner_id=owner_id, client_id=client_id)
     plan_state = restarted.get_deletion_plan(UUID(plan["plan_id"]))

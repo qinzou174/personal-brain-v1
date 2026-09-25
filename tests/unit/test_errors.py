@@ -5,7 +5,9 @@ def test_stable_error_codes_have_safe_mappings():
     # Protocol-level transport refusals are part of the stable surface: they must
     # stay distinguishable from credential failures on the wire.
     assert {"ORIGIN_NOT_ALLOWED", "MCP_SESSION_REQUIRED"} <= STABLE_CODES
-    assert len(STABLE_CODES) == 23
+    # 23 -> 24 (003-correction-delete-ux): ALREADY_RESOLVED reports the
+    # idempotent state of an already-decided review item (R9).
+    assert len(STABLE_CODES) == 24
     for code in STABLE_CODES - {"JOB_ACCEPTED"}:
         response = safe_error(BrainError(code), correlation_id="corr-1")
         assert response["code"] == code
