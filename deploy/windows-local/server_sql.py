@@ -14,7 +14,7 @@ import paramiko
 
 from _ssh import open_client
 
-PROD_SECRET = "/home/kms/personal-brain-v1-prod-data/secrets/db_password"
+PROD_SECRET = "/home/kms/deploy/personal-brain/prod-data/secrets/db_password"
 DB_CONTAINER = "personal-brain-v1-prod-db-1"
 
 
