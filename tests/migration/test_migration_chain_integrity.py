@@ -25,6 +25,8 @@ EXPECTED_ORDER = [
     "0011_notifications",
     "0012_search_read_grants",
     "0013_review_notification_trigger",
+    "0014_class_c_gate_deletion",
+    "0015_search_index_chunks",
 ]
 
 
@@ -46,11 +48,11 @@ def test_chain_is_contiguous_and_acyclic():
 
 def test_no_orphan_or_duplicate_nodes():
     parents = [migration.down_revision for migration in (_load(r) for r in EXPECTED_ORDER) if migration.down_revision is not None]
-    # Every node except the head (0013) is referenced exactly once as a parent;
+    # Every node except the head (0015) is referenced exactly once as a parent;
     # the root (0001) has no parent. No duplicates, no gaps.
     assert len(parents) == len(EXPECTED_ORDER) - 1
     assert len(set(parents)) == len(parents)
-    assert set(parents) == set(EXPECTED_ORDER) - {"0013_review_notification_trigger"}
+    assert set(parents) == set(EXPECTED_ORDER) - {"0015_search_index_chunks"}
 
 
 def test_source_and_target_versions_line_up():

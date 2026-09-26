@@ -110,6 +110,8 @@ def _admin_command(settings: Settings, args: argparse.Namespace) -> dict[str, ob
         metadata.reflect(engine)
         from pgvector.sqlalchemy import VECTOR
         metadata.tables["search_index_entries"].c.embedding.type = VECTOR()
+        if "search_index_chunks" in metadata.tables:
+            metadata.tables["search_index_chunks"].c.embedding.type = VECTOR()
         factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
         if args.command == "provision-client":
             return provision_client(
@@ -180,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         metadata.reflect(engine)
         from pgvector.sqlalchemy import VECTOR
         metadata.tables["search_index_entries"].c.embedding.type = VECTOR()
+        if "search_index_chunks" in metadata.tables:
+            metadata.tables["search_index_chunks"].c.embedding.type = VECTOR()
         factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
         opaque_authority = PersistedAuthority(factory, metadata.tables)
         public_host = settings.published_host or settings.bind_host
@@ -223,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             storage=LocalStorage(settings.data_root / "assets"),
             search_factory=lambda *, owner_id: PostgresSearchRepository(
                 factory, metadata.tables["search_index_entries"], owner_id=owner_id,
+                chunk_table=metadata.tables.get("search_index_chunks"),
             ),
             model_gateway=model_gateway, embedding_provider=embedding_provider,
         )

@@ -8,6 +8,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from personal_brain_domain.common.errors import BrainError
+from personal_brain_infra.search.chunking import split_chunks
 from personal_brain_infra.search.repository import PostgresSearchRepository
 
 
@@ -260,26 +261,55 @@ class SearchIndexer:
                     "skipped": "source_gone"}
         repository = PostgresSearchRepository(
             self._factory, self._tables["search_index_entries"], owner_id=owner_id,
+            chunk_table=self._tables.get("search_index_chunks"),
         )
         warnings: list[str] = []
         if self._embedder is not None:
-            try:
-                entry["embedding"] = self._embedder.embed(entry["text"])
-            except BrainError as error:
-                # Decision (b), 2026-09-25: secret-like content keeps its canonical
-                # raw text locally (*never* sent to an embedding provider), so the
-                # card degrades to keyword-only instead of dead-lettering the job.
-                # The skip is declared on the card so retrieval stays honest.
-                if error.code != "SECRET_REJECTED":
-                    raise
-                warnings.append("secret_like_semantic_skipped")
+            pieces = split_chunks(entry["text"])
+            if len(pieces) > 1:
+                # Long document: one focused embedding per chunk, the parent card
+                # stays whole-vector-free so the diluted document average never
+                # competes in the semantic list (RRF single-list drowning fix).
+                try:
+                    vectors = self._embed_pieces(pieces)
+                except BrainError as error:
+                    # Decision (b), 2026-09-25: secret-like content keeps its
+                    # canonical raw text locally (*never* sent to an embedding
+                    # provider) — a secret chunk degrades the whole card to
+                    # keyword-only, consistent with the short-document path.
+                    if error.code != "SECRET_REJECTED":
+                        raise
+                    warnings.append("secret_like_semantic_skipped")
+                else:
+                    entry["vector_model_version"] = self._embedder.model_version
+                    entry["chunks"] = list(zip(pieces, vectors))
             else:
-                entry["vector_model_version"] = self._embedder.model_version
+                try:
+                    entry["embedding"] = self._embedder.embed(entry["text"])
+                except BrainError as error:
+                    # Decision (b), 2026-09-25: secret-like content keeps its canonical
+                    # raw text locally (*never* sent to an embedding provider), so the
+                    # card degrades to keyword-only instead of dead-lettering the job.
+                    # The skip is declared on the card so retrieval stays honest.
+                    if error.code != "SECRET_REJECTED":
+                        raise
+                    warnings.append("secret_like_semantic_skipped")
+                else:
+                    entry["vector_model_version"] = self._embedder.model_version
         entry_id = repository.index(**entry, warnings=warnings)
         result: dict[str, Any] = {
             "search_entry_id": entry_id, "target_ref": f"{target_type}:{target_id}",
             "indexed": True,
         }
+        if "chunks" in entry:
+            result["chunk_count"] = len(entry["chunks"])
         if warnings:
             result["warnings"] = warnings
         return result
+
+    def _embed_pieces(self, pieces: list[str]) -> list[list[float]]:
+        """Embed chunk texts, preferring a provider-native batch call."""
+        embed_many = getattr(self._embedder, "embed_many", None)
+        if callable(embed_many):
+            return [list(vector) for vector in embed_many(pieces)]
+        return [self._embedder.embed(piece) for piece in pieces]

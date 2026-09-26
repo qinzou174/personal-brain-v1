@@ -192,7 +192,7 @@ def make_digest_handler(
                         generator_version=DIGEST_VERSION,
                     ))
             _index_digest(
-                session_factory, tables["search_index_entries"], embedder, owner_id=owner_id,
+                session_factory, tables, embedder, owner_id=owner_id,
                 digest_id=digest_id, scope=scope, sensitivity=sensitivity,
                 text=summary, source_links=source_links, content_time=moment.isoformat(),
             )
@@ -206,7 +206,7 @@ def make_digest_handler(
 
 
 def _index_digest(
-    session_factory: Any, index_table: sa.Table, embedder: Any | None, *,
+    session_factory: Any, tables: Mapping[str, sa.Table], embedder: Any | None, *,
     owner_id: UUID, digest_id: UUID, scope: str, sensitivity: str,
     text: str, source_links: list[str], content_time: str | None = None,
 ) -> None:
@@ -214,21 +214,39 @@ def _index_digest(
     with session_factory() as session:
         if session.get_bind().dialect.name != "postgresql":
             return
+    from personal_brain_infra.search.chunking import split_chunks
     from personal_brain_infra.search.repository import PostgresSearchRepository
 
     embedding = vector_model_version = None
+    chunks = None
     if embedder is not None:
         try:
-            embedding = embedder.embed(text)
+            pieces = split_chunks(text)
+            if len(pieces) > 1:
+                # Long digest: focused chunk vectors instead of one diluted
+                # document average (same shape as the indexer's long path).
+                embed_many = getattr(embedder, "embed_many", None)
+                vectors = (
+                    [list(vector) for vector in embed_many(pieces)]
+                    if callable(embed_many)
+                    else [embedder.embed(piece) for piece in pieces]
+                )
+                chunks = list(zip(pieces, vectors))
+            else:
+                embedding = embedder.embed(text)
             vector_model_version = embedder.model_version
         except BrainError:
             # A failed embedding must not lose the digest: it stays keyword-searchable.
             embedding = vector_model_version = None
-    repository = PostgresSearchRepository(session_factory, index_table, owner_id=owner_id)
+            chunks = None
+    repository = PostgresSearchRepository(
+        session_factory, tables["search_index_entries"], owner_id=owner_id,
+        chunk_table=tables.get("search_index_chunks"),
+    )
     repository.index(
         target_type="derived_content", target_id=digest_id, authorized_scope=scope,
         sensitivity=sensitivity, canonicality="derived", freshness="fresh",
         text=text, source_links=source_links, embedding=embedding,
-        vector_model_version=vector_model_version,
+        vector_model_version=vector_model_version, chunks=chunks,
         content_time=content_time,
     )

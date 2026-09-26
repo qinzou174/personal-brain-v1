@@ -35,6 +35,8 @@ def main() -> int:
         metadata.reflect(engine)
         from pgvector.sqlalchemy import VECTOR
         metadata.tables["search_index_entries"].c.embedding.type = VECTOR()
+        if "search_index_chunks" in metadata.tables:
+            metadata.tables["search_index_chunks"].c.embedding.type = VECTOR()
         jobs = metadata.tables["jobs"]
 
         factory = sessionmaker(engine, class_=Session, expire_on_commit=False)

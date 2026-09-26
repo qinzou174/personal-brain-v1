@@ -16,9 +16,11 @@ _SENSITIVITY_ORDER = SENSITIVITY_ORDER  # legacy private alias
 
 
 class PostgresSearchRepository:
-    def __init__(self, session_factory: Any, table: sa.Table, *, owner_id: UUID) -> None:
+    def __init__(self, session_factory: Any, table: sa.Table, *, owner_id: UUID,
+                 chunk_table: sa.Table | None = None) -> None:
         self._factory = session_factory
         self._table = table
+        self._chunk_table = chunk_table
         self.owner_id = owner_id
         with session_factory() as session:
             if session.get_bind().dialect.name != "postgresql":
@@ -30,11 +32,21 @@ class PostgresSearchRepository:
         source_links: Sequence[str], vector_model_version: str | None = None,
         embedding: Sequence[float] | None = None, warnings: Sequence[str] = (),
         content_time: str | None = None,
+        chunks: Sequence[tuple[str, Sequence[float]]] | None = None,
     ) -> str:
         if sensitivity not in _SENSITIVITY_ORDER:
             raise ValueError("secret/unknown sensitivity cannot enter search")
         if embedding is not None and not vector_model_version:
             raise ValueError("embedding requires a model version")
+        if chunks:
+            # A card is either whole-vector (short) or chunked (long): the
+            # diluted whole-doc average must never compete with its own chunks.
+            if self._chunk_table is None:
+                raise ValueError("chunk indexing requires the search_index_chunks table")
+            if not vector_model_version:
+                raise ValueError("chunked indexing requires a model version")
+            if embedding is not None:
+                raise ValueError("a card cannot carry both a whole vector and chunks")
         now, entry_id = datetime.now(timezone.utc), uuid4()
         metadata = {
             "source_links": list(source_links), "warnings": list(warnings),
@@ -60,6 +72,20 @@ class PostgresSearchRepository:
                 searchable_text=fts_text(text), embedding=None if embedding is None else list(embedding),
                 vector_model_version=vector_model_version, metadata_filters=metadata, indexed_at=now,
             ))
+            if chunks:
+                # Chunk lifetime is subordinate to the parent card: this new
+                # entry_id owns the fresh rows, and any prior card for the same
+                # target (same model version) was deleted above, cascading its
+                # chunks away. No separate chunk-replacement step can race.
+                session.execute(self._chunk_table.insert().values([
+                    {
+                        "id": uuid4(), "owner_id": self.owner_id, "entry_id": entry_id,
+                        "chunk_seq": seq, "chunk_text": chunk_text,
+                        "embedding": list(chunk_vector),
+                        "vector_model_version": vector_model_version,
+                    }
+                    for seq, (chunk_text, chunk_vector) in enumerate(chunks)
+                ]))
         return str(entry_id)
 
     def search(
@@ -108,12 +134,40 @@ class PostgresSearchRepository:
         with self._factory() as session:
             keyword_rows = session.execute(keyword_stmt).mappings().all()
             if query_embedding is not None and vector_model_version:
+                # ER-03: RRF is the only cross-list ranking authority — these two
+                # lists only feed it. The semantic list is assembled from two
+                # sources: focused chunks (long docs, one row per parent card via
+                # DISTINCT ON = max chunk score) and the legacy whole-card vector
+                # (short docs). Chunked cards carry no whole-doc vector, so the
+                # sources are disjoint by construction; the per-card min-distance
+                # merge only guards side-by-side model-version leftovers.
+                candidates: list[Mapping[str, Any]] = []
+                if self._chunk_table is not None:
+                    chunk_distance = self._chunk_table.c.embedding.cosine_distance(list(query_embedding))
+                    chunk_stmt = sa.select(
+                        self._table, chunk_distance.label("distance"),
+                    ).select_from(self._chunk_table.join(
+                        self._table, self._chunk_table.c.entry_id == self._table.c.id,
+                    )).where(
+                        *base, self._chunk_table.c.vector_model_version == vector_model_version,
+                    ).distinct(self._table.c.id).order_by(
+                        self._table.c.id, chunk_distance,
+                    ).limit(50)
+                    candidates.extend(session.execute(chunk_stmt).mappings().all())
                 distance = self._table.c.embedding.cosine_distance(list(query_embedding))
                 semantic_stmt = sa.select(self._table, distance.label("distance")).where(
                     *base, self._table.c.embedding.is_not(None),
                     self._table.c.vector_model_version == vector_model_version,
                 ).order_by(distance, self._table.c.id).limit(50)
-                semantic_rows = session.execute(semantic_stmt).mappings().all()
+                candidates.extend(session.execute(semantic_stmt).mappings().all())
+                best: dict[Any, Mapping[str, Any]] = {}
+                for row in candidates:
+                    known = best.get(row["id"])
+                    if known is None or row["distance"] < known["distance"]:
+                        best[row["id"]] = row
+                semantic_rows = sorted(
+                    best.values(), key=lambda row: (row["distance"], str(row["id"])),
+                )[:50]
         keyword_ids = [row["id"] for row in keyword_rows]
         semantic_ids = [row["id"] for row in semantic_rows]
         scores = rrf_fuse(keyword_rank=keyword_ids, semantic_rank=semantic_ids)

@@ -132,7 +132,9 @@ def test_deletion_loop_create_see_confirm_and_delete(harness):
     assert table_rows(harness, "deletion_actions", owner_id=owner_id)
     assert [row for row in table_rows(harness, "jobs", owner_id=owner_id)
             if row["job_type"] == "reconcile_deletion"]
-    assert service.list_review_items(credential=token)["items"] == []
+    # B-02: state=None lists every state, so the settled (approved) item still
+    # appears — the loop invariant is that no *open* item remains.
+    assert service.list_review_items(credential=token, state="open")["items"] == []
 
     # Single use: the same confirmation cannot be replayed (R9: the
     # idempotent "already resolved" state).

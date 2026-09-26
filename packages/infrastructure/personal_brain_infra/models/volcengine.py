@@ -7,7 +7,7 @@ request/response headers or payload bodies are logged here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import httpx
 from pydantic import SecretStr
@@ -18,6 +18,10 @@ from personal_brain_domain.security.secret_filter import detect_secret
 
 def _endpoint(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+# Chunk texts per embeddings call; a batch failure falls back to single items.
+EMBED_BATCH_SIZE = 10
 
 
 @dataclass(frozen=True)
@@ -107,12 +111,45 @@ class VolcengineEmbeddingProvider:
             raise BrainError("VALIDATION_FAILED")
         if detect_secret(filename="embedding-input.txt", content_type="text/plain", content=text).matched:
             raise BrainError("SECRET_REJECTED")
+        return self._embed_batch([text], timeout_seconds=timeout_seconds)[0]
+
+    def embed_many(self, texts: Sequence[str], *, timeout_seconds: int = 60) -> list[list[float]]:
+        """Embed the chunk texts of one long document.
+
+        Any secret-like chunk degrades the whole card (``SECRET_REJECTED``) —
+        decision (b): suspect content is never sent upstream, even in part.
+        Batches are sent together when the provider accepts them; a batch that
+        fails while bigger than one item falls back to single-item calls so an
+        input-count cap never blocks indexing (a genuinely unavailable provider
+        still fails the first single call and surfaces honestly).
+        """
+        if not texts:
+            raise BrainError("VALIDATION_FAILED")
+        for text in texts:
+            if not text.strip():
+                raise BrainError("VALIDATION_FAILED")
+            if detect_secret(filename="embedding-input.txt", content_type="text/plain", content=text).matched:
+                raise BrainError("SECRET_REJECTED")
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[start:start + EMBED_BATCH_SIZE]
+            try:
+                vectors.extend(self._embed_batch(batch, timeout_seconds=timeout_seconds))
+            except BrainError as error:
+                if error.code == "BRAIN_UNAVAILABLE" and len(batch) > 1:
+                    for text in batch:
+                        vectors.append(self.embed(text, timeout_seconds=timeout_seconds))
+                else:
+                    raise
+        return vectors
+
+    def _embed_batch(self, texts: Sequence[str], *, timeout_seconds: int) -> list[list[float]]:
         body = {
             "model": self.model,
             "encoding_format": "float",
             "dimensions": self.dimensions,
             "instructions": "Target_modality: text. Instruction: Retrieve semantically similar personal knowledge.",
-            "input": [{"type": "text", "text": text}],
+            "input": [{"type": "text", "text": text} for text in texts],
         }
         headers = {
             "content-type": "application/json",
@@ -128,12 +165,17 @@ class VolcengineEmbeddingProvider:
                 data = response.json().get("data")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError) as error:
             raise BrainError("BRAIN_UNAVAILABLE") from error
-        if isinstance(data, list) and data:
-            data = data[0]
-        vector = data.get("embedding") if isinstance(data, dict) else None
-        if not isinstance(vector, list) or len(vector) != self.dimensions:
+        if isinstance(data, dict):
+            data = [data]
+        if not (isinstance(data, list) and len(data) == len(texts)):
             raise BrainError("BRAIN_UNAVAILABLE")
-        try:
-            return [float(value) for value in vector]
-        except (TypeError, ValueError) as error:
-            raise BrainError("BRAIN_UNAVAILABLE") from error
+        vectors = []
+        for item in data:
+            vector = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(vector, list) or len(vector) != self.dimensions:
+                raise BrainError("BRAIN_UNAVAILABLE")
+            try:
+                vectors.append([float(value) for value in vector])
+            except (TypeError, ValueError) as error:
+                raise BrainError("BRAIN_UNAVAILABLE") from error
+        return vectors
